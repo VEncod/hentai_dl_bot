@@ -1,0 +1,8 @@
+[phases.setup]
+aptPkgs = ["ffmpeg"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt", "chmod +x binary/N_m3u8DL-RE"]
+
+[start]
+cmd = "python app.py"

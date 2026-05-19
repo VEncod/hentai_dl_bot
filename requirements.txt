@@ -1,7 +1,6 @@
-pyrogram==1.4.16
-TgCrypto
-pymongo
+pyrofork>=2.3.0
+TgCrypto-pyrofork
+pymongo[srv]
 dnspython
-ffmpeg
-requests
-requests_html
+aiohttp
+motor
