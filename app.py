@@ -9,7 +9,7 @@ from utils.db import init_db
 
 from plugin.start import start_command
 from plugin.search_hentai import hentaisearch
-from plugin.info_hentai import infohentai
+from plugin.info_hentai import infohentai, episode_info
 from plugin.video_hentai import hentailink, hentaidl
 from plugin.admin import addadmin_command, removeadmin_command, admins_command
 from plugin.users import (
@@ -100,6 +100,7 @@ async def main():
 
     # ── Callback query handlers ─────────────────────────────────────────
     bot.add_handler(CallbackQueryHandler(infohentai, filters.regex(r"^info_")))
+    bot.add_handler(CallbackQueryHandler(episode_info, filters.regex(r"^eps_")))
     bot.add_handler(CallbackQueryHandler(hentailink, filters.regex(r"^link_")))
     bot.add_handler(CallbackQueryHandler(hentaidl, filters.regex(r"^dlt_")))
     bot.add_handler(CallbackQueryHandler(approve_callback, filters.regex(r"^apr_")))

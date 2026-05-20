@@ -3,12 +3,13 @@ Async wrapper around hanime.tv APIs.
 
 Functions:
     search(query, page=0)   -> list of hit dicts
-    details(slug)           -> dict with video metadata
+    details(slug)           -> dict with video metadata + episodes
     get_streams(slug)       -> dict with 'streams' list and 'dl_url'
 """
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import aiohttp
@@ -30,7 +31,6 @@ _HEADERS = {
 
 
 def _unix_to_date(ts: int | float | None) -> str:
-    """Convert a unix timestamp to a human-readable date string."""
     if not ts:
         return "N/A"
     try:
@@ -40,7 +40,6 @@ def _unix_to_date(ts: int | float | None) -> str:
 
 
 def _format_duration(ms: int | None) -> str:
-    """Convert duration_in_ms to mm:ss string."""
     if not ms:
         return "N/A"
     total_secs = int(ms) // 1000
@@ -48,16 +47,25 @@ def _format_duration(ms: int | None) -> str:
     return f"{mins}:{secs:02d}"
 
 
+def _fix_pixeldrain_url(url: str) -> str:
+    """
+    Convert pixeldrain page URLs to direct download API URLs.
+    https://pixeldrain.com/d/XXXX  -> https://pixeldrain.com/api/file/XXXX
+    https://pixeldrain.com/u/XXXX  -> https://pixeldrain.com/api/file/XXXX
+    """
+    if not url:
+        return url
+    m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", url)
+    if m:
+        file_id = m.group(1)
+        return f"https://pixeldrain.com/api/file/{file_id}"
+    return url
+
+
 # ── Search ──────────────────────────────────────────────────────────────
 
 async def search(query: str, page: int = 0) -> list[dict]:
-    """
-    Search for hentai videos.
-
-    Returns a list of hit dicts, each containing:
-        id, name, slug, description, views, poster_url, cover_url,
-        brand, duration_in_ms, likes, dislikes, tags, released_at, created_at
-    """
+    """Search for hentai videos. Returns list of hit dicts."""
     payload = {
         "search_text": query,
         "tags": [],
@@ -75,54 +83,51 @@ async def search(query: str, page: int = 0) -> list[dict]:
                 resp.raise_for_status()
                 data = await resp.json()
     except aiohttp.ClientError as e:
-        log.error("Search request failed for query=%r page=%d: %s", query, page, e)
+        log.error("Search failed for query=%r: %s", query, e)
         raise
     except Exception:
         log.exception("Unexpected error during search for query=%r", query)
         raise
 
-    # hits is a JSON string that needs double-parsing
     raw_hits = data.get("hits", "[]")
     if isinstance(raw_hits, str):
         try:
             hits = json.loads(raw_hits)
         except json.JSONDecodeError:
-            log.error("Failed to parse hits JSON string for query=%r", query)
+            log.error("Failed to parse hits JSON for query=%r", query)
             return []
     else:
-        # In case the API changes and returns a list directly
         hits = raw_hits
 
-    if not isinstance(hits, list):
-        log.warning("Unexpected hits type %s for query=%r", type(hits).__name__, query)
-        return []
-
-    return hits
+    return hits if isinstance(hits, list) else []
 
 
 # ── Video Details ───────────────────────────────────────────────────────
+
+async def _fetch_video_data(slug: str) -> dict:
+    """Fetch raw video data from the API."""
+    try:
+        async with aiohttp.ClientSession(headers=_HEADERS, timeout=_TIMEOUT) as session:
+            async with session.get(VIDEO_URL, params={"id": slug}) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+    except aiohttp.ClientError as e:
+        log.error("Video API failed for slug=%r: %s", slug, e)
+        raise
+    except Exception:
+        log.exception("Unexpected error for slug=%r", slug)
+        raise
+
 
 async def details(slug: str) -> dict:
     """
     Get detailed info for a video by slug.
 
-    Returns a dict with:
-        name, slug, views, poster_url, cover_url, description,
-        released_date, likes, dislikes, duration, duration_ms,
-        brand, tags (list of tag name strings), titles (list)
+    Returns dict with: name, slug, views, poster_url, cover_url, description,
+    released_date, likes, dislikes, duration, duration_ms, brand, tags, titles,
+    episodes (list of {name, slug} for the franchise)
     """
-    try:
-        async with aiohttp.ClientSession(headers=_HEADERS, timeout=_TIMEOUT) as session:
-            async with session.get(VIDEO_URL, params={"id": slug}) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-    except aiohttp.ClientError as e:
-        log.error("Details request failed for slug=%r: %s", slug, e)
-        raise
-    except Exception:
-        log.exception("Unexpected error fetching details for slug=%r", slug)
-        raise
-
+    data = await _fetch_video_data(slug)
     hv = data.get("hentai_video", {})
 
     # Extract tag names
@@ -133,6 +138,16 @@ async def details(slug: str) -> dict:
             tag_names.append(t.get("text", t.get("name", "unknown")))
         elif isinstance(t, str):
             tag_names.append(t)
+
+    # Extract franchise episodes
+    episodes = []
+    for ep in data.get("hentai_franchise_hentai_videos", []):
+        if isinstance(ep, dict):
+            episodes.append({
+                "name": ep.get("name", "Unknown"),
+                "slug": ep.get("slug", ""),
+                "poster_url": ep.get("poster_url", ""),
+            })
 
     return {
         "name": hv.get("name", "Unknown"),
@@ -149,6 +164,7 @@ async def details(slug: str) -> dict:
         "brand": hv.get("brand", "N/A"),
         "tags": tag_names,
         "titles": hv.get("titles", []),
+        "episodes": episodes,
     }
 
 
@@ -158,21 +174,11 @@ async def get_streams(slug: str) -> dict:
     """
     Get stream URLs and download link for a video.
 
-    Returns a dict with:
-        streams: list of {url, height, width, kind, filename, filesize_mbs, is_downloadable}
-        dl_url: direct download URL (may be empty string)
+    Returns dict with:
+        streams: list of {url, height, width, kind, ...}
+        dl_url: direct download URL (pixeldrain fixed to API format)
     """
-    try:
-        async with aiohttp.ClientSession(headers=_HEADERS, timeout=_TIMEOUT) as session:
-            async with session.get(VIDEO_URL, params={"id": slug}) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-    except aiohttp.ClientError as e:
-        log.error("Streams request failed for slug=%r: %s", slug, e)
-        raise
-    except Exception:
-        log.exception("Unexpected error fetching streams for slug=%r", slug)
-        raise
+    data = await _fetch_video_data(slug)
 
     streams = []
     manifest = data.get("videos_manifest", {})
@@ -191,10 +197,10 @@ async def get_streams(slug: str) -> dict:
                 "is_downloadable": stream.get("is_downloadable", False),
             })
 
-    # Sort by height descending so highest quality is first
-    streams.sort(key=lambda s: s.get("height", 0), reverse=True)
+    streams.sort(key=lambda s: int(s.get("height", 0) or 0), reverse=True)
 
-    dl_url = data.get("dl_url", "") or ""
+    # Fix pixeldrain URL to use direct download API
+    dl_url = _fix_pixeldrain_url(data.get("dl_url", "") or "")
 
     return {
         "streams": streams,
