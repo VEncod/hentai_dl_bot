@@ -89,6 +89,14 @@ async def removeadmin_command(client: Client, message: Message):
 
 
 @admin_only
+async def clearcache_command(client: Client, message: Message):
+    """Clear all cached file IDs (forces fresh downloads)."""
+    db = get_db()
+    result = await db.Name.delete_many({})
+    await message.reply_text(f"🗑 Cleared {result.deleted_count} cached entries. Next downloads will be fresh.")
+
+
+@admin_only
 async def admins_command(client: Client, message: Message):
     """List all admins."""
     db = get_db()

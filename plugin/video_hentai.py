@@ -302,17 +302,26 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         if log_msg_id:
             await log_download_progress(client, log_msg_id, username, slug, 100)
         try:
-            await client.send_document(
+            sent_cached = await client.send_document(
                 chat_id=chat_id,
                 document=cached["file_id"],
                 caption="Downloaded via @hanime_dl_bot",
             )
-            await log_upload_complete(client, log_msg_id, slug, cached["file_id"])
+            # Verify the cached file isn't tiny (bad cache from earlier bug)
+            if sent_cached.document and sent_cached.document.file_size and sent_cached.document.file_size < 50_000:
+                log.warning("Cached file for %s is only %d bytes — deleting bad cache entry",
+                            slug, sent_cached.document.file_size)
+                await db.Name.delete_one({"name": slug})
+                await _safe_edit(callback_query, "🔄 **Cache was stale, re-downloading...**")
+                # Don't return — fall through to fresh download
+            else:
+                await log_upload_complete(client, log_msg_id, slug, cached["file_id"])
+                return
         except Exception:
-            log.exception("Failed to send cached file for %s", slug)
-            await _safe_edit(callback_query, "❌ Failed to send file. Cache may be stale.")
-            await log_error(client, username, f"Cache send failed for {slug}")
-        return
+            log.exception("Failed to send cached file for %s — removing bad cache", slug)
+            await db.Name.delete_one({"name": slug})
+            await _safe_edit(callback_query, "🔄 **Cache error, re-downloading...**")
+            # Fall through to fresh download
 
     # Fetch streams
     try:

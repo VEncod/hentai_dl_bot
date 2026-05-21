@@ -11,7 +11,7 @@ from plugin.start import start_command
 from plugin.search_hentai import hentaisearch
 from plugin.info_hentai import infohentai, episode_info
 from plugin.video_hentai import hentailink, hentaidl
-from plugin.admin import addadmin_command, removeadmin_command, admins_command
+from plugin.admin import addadmin_command, removeadmin_command, admins_command, clearcache_command
 from plugin.users import (
     request_command, approve_command, reject_command, revoke_command,
     users_command, pending_command, adduser_command, removeuser_command,
@@ -74,6 +74,7 @@ async def main():
     bot.add_handler(MessageHandler(addadmin_command, filters.command("addadmin")))
     bot.add_handler(MessageHandler(removeadmin_command, filters.command("removeadmin")))
     bot.add_handler(MessageHandler(admins_command, filters.command("admins")))
+    bot.add_handler(MessageHandler(clearcache_command, filters.command("clearcache")))
 
     # User management commands
     bot.add_handler(MessageHandler(request_command, filters.command("request")))
