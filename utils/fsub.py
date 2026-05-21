@@ -78,9 +78,9 @@ async def _get_channel_link(client: Client, channel_id: int) -> str:
     if channel_id in _channel_link_cache:
         return _channel_link_cache[channel_id]
 
-    # Check DB for saved permanent link
+    # Check DB for saved permanent link — but verify it's still a valid format
     saved = await _get_saved_invite_link(channel_id)
-    if saved:
+    if saved and saved.startswith("https://t.me/"):
         _channel_link_cache[channel_id] = saved
         return saved
 
