@@ -17,7 +17,7 @@ from utils.db import get_db
 
 log = logging.getLogger(__name__)
 
-# Cache the channel invite link to avoid repeated API calls
+# In-memory cache
 _channel_link_cache: dict[int, str] = {}
 
 
@@ -28,6 +28,25 @@ async def get_main_channel_id() -> int | None:
     if doc:
         return int(doc["value"])
     return None
+
+
+async def _get_saved_invite_link(channel_id: int) -> str | None:
+    """Get saved invite link from DB."""
+    db = get_db()
+    doc = await db.config.find_one({"key": f"invite_link_{channel_id}"})
+    if doc:
+        return doc["value"]
+    return None
+
+
+async def _save_invite_link(channel_id: int, link: str):
+    """Save invite link to DB for persistence."""
+    db = get_db()
+    await db.config.update_one(
+        {"key": f"invite_link_{channel_id}"},
+        {"$set": {"key": f"invite_link_{channel_id}", "value": link}},
+        upsert=True,
+    )
 
 
 async def _is_member(client: Client, channel_id: int, user_id: int) -> bool:
@@ -59,6 +78,12 @@ async def _get_channel_link(client: Client, channel_id: int) -> str:
     if channel_id in _channel_link_cache:
         return _channel_link_cache[channel_id]
 
+    # Check DB for saved permanent link
+    saved = await _get_saved_invite_link(channel_id)
+    if saved:
+        _channel_link_cache[channel_id] = saved
+        return saved
+
     link = None
     try:
         chat = await client.get_chat(channel_id)
@@ -71,17 +96,31 @@ async def _get_channel_link(client: Client, channel_id: int) -> str:
     except Exception:
         log.warning("get_chat failed for %s", channel_id)
 
-    # If no public link, try exporting an invite link
+    # If no public link, create a permanent invite link
     if not link:
         try:
-            link = await client.export_chat_invite_link(channel_id)
-            log.info("Exported invite link for %s: %s", channel_id, link)
+            # create_chat_invite_link with no expiry = permanent
+            invite = await client.create_chat_invite_link(
+                channel_id,
+                name="Force Sub Bot Link",
+                creates_join_request=False,
+            )
+            link = invite.invite_link
+            log.info("Created permanent invite link for %s: %s", channel_id, link)
         except Exception:
-            log.warning("export_chat_invite_link failed for %s", channel_id)
+            log.warning("create_chat_invite_link failed for %s, trying export", channel_id)
+            try:
+                link = await client.export_chat_invite_link(channel_id)
+                log.info("Exported invite link for %s: %s", channel_id, link)
+            except Exception:
+                log.warning("export_chat_invite_link also failed for %s", channel_id)
 
     if not link:
         log.error("Could not get ANY join link for channel %s! Make sure bot is admin.", channel_id)
-        link = f"https://t.me/+placeholder"
+        link = "https://t.me/+placeholder"
+    else:
+        # Save to DB so it persists across restarts
+        await _save_invite_link(channel_id, link)
 
     _channel_link_cache[channel_id] = link
     return link
