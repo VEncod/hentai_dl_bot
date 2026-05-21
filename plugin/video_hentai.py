@@ -13,6 +13,8 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
 )
 
+import re
+
 from api.hanime import get_streams, details
 from utils.auth import approved_only
 from utils.fsub import force_sub
@@ -50,6 +52,12 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
 
     streams = data["streams"]
     dl_url = data["dl_url"]
+
+    # Fix pixeldrain URL
+    if dl_url:
+        m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", dl_url)
+        if m:
+            dl_url = f"https://pixeldrain.com/api/file/{m.group(1)}"
 
     if not streams and not dl_url:
         await callback_query.answer("No stream links available.", show_alert=True)
@@ -309,6 +317,14 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     streams = data["streams"]
     dl_url = data["dl_url"]
+
+    # Double-check: fix pixeldrain URL if not already fixed
+    if dl_url:
+        m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", dl_url)
+        if m:
+            dl_url = f"https://pixeldrain.com/api/file/{m.group(1)}"
+            log.info("Fixed pixeldrain URL to: %s", dl_url)
+
     filename = f"{slug}.mp4"
     downloaded = False
 
