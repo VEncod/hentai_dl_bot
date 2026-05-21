@@ -15,6 +15,7 @@ from pyrogram.types import Message
 
 from utils.db import get_db
 from utils.auth import admin_only
+from utils.fsub import clear_fsub_cache
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ async def setchannel_command(client: Client, message: Message):
         )
         return
 
+    clear_fsub_cache()
     await message.reply_text(f"✅ Main channel set to `{channel_id}`.")
 
 
@@ -122,6 +124,7 @@ async def removechannel_command(client: Client, message: Message):
     """Remove the main channel."""
     db = get_db()
     result = await db.config.delete_one({"key": "main_channel"})
+    clear_fsub_cache()
     if result.deleted_count:
         await message.reply_text("✅ Main channel removed.")
     else:

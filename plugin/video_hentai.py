@@ -260,6 +260,13 @@ def _extract_series_name(slug: str) -> str:
     return slug
 
 
+def _progress_bar(pct: int, length: int = 12) -> str:
+    """Generate a stylish progress bar."""
+    filled = int(length * pct / 100)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {pct}%"
+
+
 async def _safe_edit(callback_query: CallbackQuery, text: str):
     """Edit message, ignoring 'message not modified' errors."""
     try:
@@ -435,12 +442,16 @@ async def quality_download(client: Client, callback_query: CallbackQuery):
     filename = f"{slug}.mp4"
     downloaded = False
 
-    # Progress callback for direct downloads
+    # Progress callback with stylish bar
     async def on_progress(pct):
         elapsed = int(time.time() - start_time)
+        bar = _progress_bar(pct)
         await _safe_edit(
             callback_query,
-            f"⬇️ **Downloading...** {pct}%\n⏱ Elapsed: {elapsed}s"
+            f"⬇️ **Downloading...**\n\n"
+            f"{bar}\n\n"
+            f"⏱ **Elapsed:** {elapsed}s\n"
+            f"📁 **File:** {slug}.mp4"
         )
         if log_msg_id:
             await log_download_progress(client, log_msg_id, username, slug, pct)
