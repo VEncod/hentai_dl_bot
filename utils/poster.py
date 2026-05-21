@@ -3,10 +3,12 @@ Poster image helper.
 
 hanime-cdn.com blocks hotlinking (403 without Referer header).
 Telegram can't fetch these URLs directly, so we download first then upload.
+Also converts webp to jpg since Telegram rejects webp in send_photo.
 """
 
 import logging
 import os
+import subprocess
 import tempfile
 
 import aiohttp
@@ -54,6 +56,24 @@ async def download_poster(url: str) -> str | None:
                     # Verify file has content
                     if os.path.getsize(tmp.name) < 1000:
                         os.unlink(tmp.name)
+                        return None
+
+                    # Convert webp to jpg (Telegram rejects webp in send_photo)
+                    if tmp.name.endswith(".webp"):
+                        jpg_path = tmp.name.rsplit(".", 1)[0] + ".jpg"
+                        try:
+                            subprocess.run(
+                                ["ffmpeg", "-y", "-i", tmp.name, jpg_path],
+                                capture_output=True, timeout=10,
+                            )
+                            os.unlink(tmp.name)
+                            if os.path.exists(jpg_path) and os.path.getsize(jpg_path) > 1000:
+                                return jpg_path
+                        except Exception:
+                            log.warning("webp->jpg conversion failed")
+                            if os.path.exists(jpg_path):
+                                os.unlink(jpg_path)
+                        # If conversion fails, try sending webp anyway
                         return None
 
                     return tmp.name
