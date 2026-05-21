@@ -11,7 +11,7 @@ from utils.db import init_db
 from plugin.start import start_command, checksub_callback
 from plugin.search_hentai import hentaisearch
 from plugin.info_hentai import infohentai, episode_info
-from plugin.video_hentai import hentailink, hentaidl, batch_download
+from plugin.video_hentai import hentailink, hentaidl, quality_download, batch_download
 from plugin.admin import addadmin_command, removeadmin_command, admins_command, clearcache_command
 from plugin.users import (
     request_command, approve_command, reject_command, revoke_command,
@@ -105,6 +105,7 @@ async def main():
     bot.add_handler(CallbackQueryHandler(episode_info, filters.regex(r"^eps_")))
     bot.add_handler(CallbackQueryHandler(hentailink, filters.regex(r"^link_")))
     bot.add_handler(CallbackQueryHandler(hentaidl, filters.regex(r"^dlt_")))
+    bot.add_handler(CallbackQueryHandler(quality_download, filters.regex(r"^qdl_")))
     bot.add_handler(CallbackQueryHandler(batch_download, filters.regex(r"^ball_")))
     bot.add_handler(CallbackQueryHandler(approve_callback, filters.regex(r"^apr_")))
     bot.add_handler(CallbackQueryHandler(reject_callback, filters.regex(r"^rej_")))

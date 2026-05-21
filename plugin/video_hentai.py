@@ -271,28 +271,120 @@ async def _safe_edit(callback_query: CallbackQuery, text: str):
 # ── Download handler ────────────────────────────────────────────────────
 
 async def hentaidl(client: Client, callback_query: CallbackQuery):
-    """Download and send the video (dlt_<slug> callback)."""
-    log.info("=== DOWNLOAD HANDLER CALLED === data=%s user=%s",
+    """Show quality/resolution options before downloading (dlt_<slug>)."""
+    log.info("=== QUALITY SELECT === data=%s user=%s",
              callback_query.data, callback_query.from_user.id)
 
-    # Manual auth check with logging
     from utils.auth import is_approved
     user_id = callback_query.from_user.id
     if not await is_approved(user_id):
-        log.info("Download blocked: user %s not approved", user_id)
-        await callback_query.answer("⛔ You don't have access. Use /request to request access.", show_alert=True)
+        await callback_query.answer("⛔ No access.", show_alert=True)
         return
 
     slug = callback_query.data.split("_", 1)[1]
+
+    try:
+        await callback_query.answer("Loading quality options...")
+    except Exception:
+        pass
+
+    try:
+        data = await get_streams(slug)
+    except Exception:
+        log.exception("Failed to fetch streams for quality select %s", slug)
+        await callback_query.answer("❌ API error", show_alert=True)
+        return
+
+    dl_url = data["dl_url"]
+    if dl_url:
+        m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", dl_url)
+        if m:
+            dl_url = f"https://pixeldrain.com/api/file/{m.group(1)}"
+
+    streams = data["streams"]
+
+    buttons = []
+
+    # Add pixeldrain option (usually 720p)
+    if dl_url:
+        buttons.append([InlineKeyboardButton(
+            "📥 720p (Pixeldrain) — Fastest",
+            callback_data=f"qdl_pd_{slug}"
+        )])
+
+    # Add HLS stream options
+    seen = set()
+    for s in streams:
+        h = str(s.get("height", 0))
+        if h in seen or h == "0":
+            continue
+        seen.add(h)
+        size_str = f" — {s['filesize_mbs']:.0f}MB" if s.get("filesize_mbs") else ""
+        buttons.append([InlineKeyboardButton(
+            f"📥 {h}p (HLS){size_str}",
+            callback_data=f"qdl_{h}_{slug}"
+        )])
+
+    if not buttons:
+        await callback_query.answer("❌ No downloadable sources found.", show_alert=True)
+        return
+
+    # If only one option, download directly
+    if len(buttons) == 1:
+        # Simulate the quality download
+        if dl_url:
+            callback_query.data = f"qdl_pd_{slug}"
+        elif streams:
+            h = str(streams[0].get("height", 0))
+            callback_query.data = f"qdl_{h}_{slug}"
+        return await quality_download(client, callback_query)
+
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"info_{slug}")])
+
+    await _safe_edit(
+        callback_query,
+        f"📺 **Select Quality for download:**\n\nChoose your preferred resolution:",
+    )
+    try:
+        await callback_query.edit_message_reply_markup(InlineKeyboardMarkup(buttons))
+    except Exception:
+        try:
+            await client.send_message(
+                chat_id=callback_query.from_user.id,
+                text="📺 **Select Quality:**",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception:
+            pass
+
+
+async def quality_download(client: Client, callback_query: CallbackQuery):
+    """Download with specific quality (qdl_<quality>_<slug>)."""
+    parts = callback_query.data.split("_", 2)
+    if len(parts) < 3:
+        await callback_query.answer("❌ Invalid format", show_alert=True)
+        return
+
+    quality = parts[1]  # "pd" for pixeldrain, or "720", "1080" etc
+    slug = parts[2]
+
+    log.info("=== QUALITY DOWNLOAD === quality=%s slug=%s user=%s",
+             quality, slug, callback_query.from_user.id)
+
+    from utils.auth import is_approved
+    user_id = callback_query.from_user.id
+    if not await is_approved(user_id):
+        await callback_query.answer("⛔ No access.", show_alert=True)
+        return
+
     chat_id = callback_query.from_user.id
     username = callback_query.from_user.username
     db = get_db()
 
     start_time = time.time()
 
-    await _safe_edit(callback_query, "⏳ **Fetching hentai for you...**\nStatus: STARTING")
+    await _safe_edit(callback_query, f"⏳ **Downloading {quality}p...**\nStatus: STARTING")
 
-    # Log download start
     log_msg_id = await log_download_start(client, username, slug)
 
     # Check cache first — validate before sending
