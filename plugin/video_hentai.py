@@ -37,10 +37,9 @@ N_M3U8DL_TIMEOUT = 180  # 3 minutes for N_m3u8DL-RE (faster)
 
 # ── Stream link buttons ─────────────────────────────────────────────────
 
-@approved_only
-@force_sub
 async def hentailink(client: Client, callback_query: CallbackQuery):
     """Show streaming links (link_<slug> callback)."""
+    log.info("=== LINK HANDLER CALLED === data=%s", callback_query.data)
     slug = callback_query.data.split("_", 1)[1]
 
     try:
@@ -271,10 +270,19 @@ async def _safe_edit(callback_query: CallbackQuery, text: str):
 
 # ── Download handler ────────────────────────────────────────────────────
 
-@approved_only
-@force_sub
 async def hentaidl(client: Client, callback_query: CallbackQuery):
     """Download and send the video (dlt_<slug> callback)."""
+    log.info("=== DOWNLOAD HANDLER CALLED === data=%s user=%s",
+             callback_query.data, callback_query.from_user.id)
+
+    # Manual auth check with logging
+    from utils.auth import is_approved
+    user_id = callback_query.from_user.id
+    if not await is_approved(user_id):
+        log.info("Download blocked: user %s not approved", user_id)
+        await callback_query.answer("⛔ You don't have access. Use /request to request access.", show_alert=True)
+        return
+
     slug = callback_query.data.split("_", 1)[1]
     chat_id = callback_query.from_user.id
     username = callback_query.from_user.username

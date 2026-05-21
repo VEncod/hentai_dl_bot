@@ -106,6 +106,11 @@ async def main():
     bot.add_handler(CallbackQueryHandler(approve_callback, filters.regex(r"^apr_")))
     bot.add_handler(CallbackQueryHandler(reject_callback, filters.regex(r"^rej_")))
 
+    # Debug: catch-all callback handler (last priority)
+    async def debug_callback(client, callback_query):
+        log.warning("UNHANDLED CALLBACK: data=%s user=%s", callback_query.data, callback_query.from_user.id)
+    bot.add_handler(CallbackQueryHandler(debug_callback))
+
     await bot.start()
     log.info("Bot started successfully!")
     await idle()
