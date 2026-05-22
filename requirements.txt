@@ -4,3 +4,6 @@ pymongo[srv]
 dnspython
 aiohttp
 motor
+cloudscraper
+beautifulsoup4
+playwright
