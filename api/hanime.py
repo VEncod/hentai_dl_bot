@@ -1,215 +1,380 @@
 """
-Wrapper around external hentai-api service (Node.js).
-Uses https://github.com/sulvii/hentai-api
+HentaiHaven scraper - Python port of sulvii/hentai-api logic.
+Directly scrapes HentaiHaven without external API dependency.
 
-Functions:
-    search(query, page=0)   -> list of hit dicts
-    details(slug)           -> dict with video metadata + episodes
-    get_streams(slug)       -> dict with 'streams' list and 'dl_url'
-
-Backward compatible with old hanime.tv signatures.
+Based on: https://github.com/sulvii/hentai-api/blob/main/src/providers/hentai-haven.ts
 """
 
 import asyncio
+import base64
+import json
 import logging
 import re
 from typing import Optional
+from datetime import datetime
+from urllib.parse import urljoin
 
 try:
-    import aiohttp
+    from bs4 import BeautifulSoup
+    import cloudscraper
 except ImportError:
-    aiohttp = None
+    BeautifulSoup = None
+    cloudscraper = None
 
 log = logging.getLogger(__name__)
 
-# Change this to your deployed hentai-api URL
-HENTAI_API_BASE = "https://hentai-api.example.com"  # Replace with actual URL
-# For local testing: "http://localhost:3000"
+BASE_URL = "https://hentaihaven.xxx"
 
 
-async def _get_http(url: str, timeout: int = 20) -> dict:
-    """Helper to make async HTTP GET requests."""
-    if aiohttp is None:
-        raise ImportError("aiohttp is required. Run: pip install aiohttp")
+def _rot13(s: str) -> str:
+    """ROT13 cipher"""
+    result = []
+    for c in s:
+        if 'a' <= c <= 'z':
+            result.append(chr((ord(c) - ord('a') + 13) % 26 + ord('a')))
+        elif 'A' <= c <= 'Z':
+            result.append(chr((ord(c) - ord('A') + 13) % 26 + ord('A')))
+        else:
+            result.append(c)
+    return ''.join(result)
+
+
+def _get_number(s: str) -> Optional[int]:
+    """Extract first number from string"""
+    match = re.search(r'\d+', s)
+    return int(match.group()) if match else None
+
+
+async def search(query: str) -> list[dict]:
+    """
+    Search HentaiHaven for content.
+    Uses cloudscraper to bypass Cloudflare.
+    """
+    if not query:
+        query = "Hatsukoi Jikan"
+    
+    if cloudscraper is None or BeautifulSoup is None:
+        raise ImportError("cloudscraper and beautifulsoup4 are required")
+    
+    url = f"{BASE_URL}/?s={query}&post_type=wp-manga"
+    log.info(f"Searching for '{query}'")
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                else:
-                    log.error(f"API error: {resp.status} for {url}")
-                    return {}
+        scraper = cloudscraper.create_scraper()
+        resp = scraper.get(url, timeout=30)
+        resp.raise_for_status()
+        html = resp.text
     except Exception as e:
-        log.error(f"HTTP request failed: {e}")
-        return {}
-
-
-def _episode_from_slug(slug: str) -> tuple[str, int]:
-    """Split 'overflow-1' into ('overflow', 1)."""
-    parts = slug.rsplit("-", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        return parts[0], int(parts[1])
-    return slug, 1
-
-
-# ── Search ──────────────────────────────────────────────────────────────
-
-async def search(query: str, page: int = 0) -> list[dict]:
-    """
-    Search hentaihaven via the external hentai-api service.
-    Returns list of hit dicts compatible with old hanime API.
-    """
-    log.info(f"Searching for '{query}' via hentai-api")
-    
-    url = f"{HENTAI_API_BASE}/api/hentaihaven/search?query={query}&page={page}"
-    data = await _get_http(url)
-    
-    if not data or "results" not in data:
-        log.warning(f"No results from hentai-api for query='{query}'")
+        log.error(f"Search request failed: {e}")
         return []
     
-    hits = []
-    for item in data.get("results", []):
-        hits.append({
-            "id": item.get("id", 0),
-            "slug": item.get("slug", item.get("id", "")),
-            "name": item.get("title", item.get("name", "Unknown")),
-            "url": item.get("url", ""),
-            "poster_url": item.get("poster", item.get("image", "")),
-            "cover_url": item.get("cover", item.get("poster", "")),
-            "description": item.get("description", ""),
-            "views": item.get("views", 0),
-            "interests": item.get("interests", 0),
-            "likes": item.get("likes", 0),
-            "dislikes": item.get("dislikes", 0),
-            "duration_in_ms": item.get("duration_ms", 0),
-            "brand": item.get("brand", "N/A"),
-            "tags": item.get("tags", []),
-            "titles": item.get("titles", [item.get("title", item.get("name", "Unknown"))]),
-            "created_at": item.get("created_at", 0),
-            "released_at": item.get("released_at", 0),
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    
+    # Parse search results from c-tabs-item__content containers
+    for content in soup.find_all('div', class_='c-tabs-item__content'):
+        try:
+            # Extract image
+            img = content.find('img')
+            cover = img.get('src', '') if img else ''
+            
+            # Extract link and ID
+            link = content.find('a', href=re.compile(r'/watch/'))
+            if not link:
+                continue
+            href = link.get('href', '')
+            id_match = re.search(r'/watch/([^/]+)/', href)
+            series_id = id_match.group(1) if id_match else ''
+            if not series_id:
+                continue
+            
+            # Extract title - can be in link text or h3
+            title = link.text.strip()
+            if not title:
+                h3 = content.find('h3')
+                if h3:
+                    title = h3.text.strip()
+            if not title:
+                title = 'Unknown'
+            
+            # Extract alternative title
+            alt_div = content.find('div', class_='mg_alternative')
+            alternative = ''
+            if alt_div:
+                content_div = alt_div.find('div', class_='summary-content')
+                if content_div:
+                    alternative = content_div.text.strip()
+            
+            # Extract author
+            author_div = content.find('div', class_='mg_author')
+            author = ''
+            if author_div:
+                content_div = author_div.find('div', class_='summary-content')
+                if content_div:
+                    author = content_div.text.strip()
+            
+            # Extract release year
+            release_div = content.find('div', class_='mg_release')
+            released = 0
+            if release_div:
+                content_div = release_div.find('div', class_='summary-content')
+                if content_div:
+                    released = _get_number(content_div.text.strip()) or 0
+            
+            # Extract episode count
+            chap_span = content.find('span', class_='chapter')
+            total_episodes = _get_number(chap_span.text.strip()) if chap_span else 1
+            
+            # Extract rating
+            rating_span = content.find('span', class_='total_votes')
+            rating = float(rating_span.text.strip()) if rating_span else 0.0
+            
+            # Extract genres
+            genres = []
+            for genre_link in content.find_all('a', href=re.compile(r'/genre/')):
+                genres.append({
+                    'name': genre_link.text.strip(),
+                    'url': genre_link.get('href', '')
+                })
+            
+            results.append({
+                'id': series_id,
+                'slug': series_id,
+                'title': title,
+                'name': title,
+                'cover': cover.replace(' ', '%20'),
+                'poster_url': cover,
+                'rating': rating,
+                'released': released,
+                'genres': genres,
+                'totalEpisodes': total_episodes,
+                'alternative': alternative,
+                'author': author,
+            })
+        except Exception as e:
+            log.warning(f"Failed to parse search result: {e}")
+            continue
+    
+    log.info(f"Found {len(results)} results")
+    return results
+
+
+async def details(series_id: str) -> dict:
+    """
+    Get detailed info about a hentai series by ID.
+    """
+    if not series_id:
+        return {}
+    
+    if cloudscraper is None or BeautifulSoup is None:
+        raise ImportError("cloudscraper and beautifulsoup4 are required")
+    
+    url = f"{BASE_URL}/watch/{series_id}"
+    log.info(f"Fetching details for {series_id}")
+    
+    try:
+        scraper = cloudscraper.create_scraper()
+        resp = scraper.get(url, timeout=30)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        log.error(f"Details request failed: {e}")
+        return {}
+    
+    if not html or "webpage has been blocked" in html:
+        log.error(f"Page blocked or empty for {series_id}")
+        return {}
+    
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # Extract title
+    title_el = soup.find('h1', class_='post-title')
+    title = title_el.text.strip() if title_el else 'Unknown'
+    
+    # Extract cover
+    cover_el = soup.find('img', class_='summary_image')
+    cover = cover_el.get('src', '') if cover_el else ''
+    
+    # Extract summary
+    summary_el = soup.find('p', class_='description-summary')
+    summary = summary_el.text.strip() if summary_el else ''
+    
+    # Extract views
+    views = 0
+    for item in soup.find_all('div', class_='post-content_item'):
+        if 'View' in item.text or 'view' in item.text:
+            views = _get_number(item.text) or 0
+            break
+    
+    # Extract rating count
+    rating_el = soup.find('span', attrs={'property': 'ratingCount'})
+    rating_count = int(rating_el.text.strip()) if rating_el else 0
+    
+    # Extract release year
+    released = 0
+    for link in soup.find_all('a'):
+        if 'post-status' in str(link.parent.get('class', [])):
+            released = _get_number(link.text) or 0
+            break
+    
+    # Extract genres
+    genres = []
+    for genre_link in soup.find_all('a', href=re.compile(r'/genre/')):
+        genres.append({
+            'name': genre_link.text.strip(),
+            'url': genre_link.get('href', '')
         })
     
-    log.info(f"Found {len(hits)} results")
-    return hits
-
-
-# ── Video Details ───────────────────────────────────────────────────────
-
-async def details(slug: str) -> dict:
-    """
-    Get detailed info for a video by slug.
-    Returns dict with same shape as old hanime API for compatibility.
-    """
-    log.info(f"Fetching details for slug='{slug}'")
+    # Extract episodes
+    episodes = []
+    ep_elements = soup.find_all('li', class_='wp-manga-chapter')
+    total_episodes = len(ep_elements)
     
-    url = f"{HENTAI_API_BASE}/api/hentaihaven/info?id={slug}"
-    data = await _get_http(url)
+    for i, ep_el in enumerate(ep_elements):
+        try:
+            link = ep_el.find('a')
+            if not link:
+                continue
+            
+            href = link.get('href', '')
+            parts = href.strip('/').split('/')
+            if len(parts) >= 2:
+                ep_id = f"{parts[-2]}/{parts[-1]}"
+                ep_id_encoded = base64.b64encode(ep_id.encode()).decode()
+            else:
+                continue
+            
+            ep_title = link.text.strip()
+            ep_number = total_episodes - i
+            
+            date_el = ep_el.find('span', class_='chapter-release-date')
+            ep_date = date_el.text.strip() if date_el else ''
+            
+            episodes.append({
+                'id': ep_id_encoded,
+                'slug': f"{series_id}-{ep_number}",
+                'title': ep_title,
+                'number': ep_number,
+                'released': ep_date,
+            })
+        except Exception as e:
+            log.warning(f"Failed to parse episode: {e}")
+            continue
     
-    if not data:
-        log.warning(f"No details found for slug='{slug}'")
+    return {
+        'id': series_id,
+        'slug': series_id,
+        'title': title,
+        'name': title,
+        'cover': cover.replace(' ', '%20') if cover else '',
+        'poster_url': cover,
+        'summary': summary,
+        'views': views,
+        'ratingCount': rating_count,
+        'released': released,
+        'genres': genres,
+        'totalEpisodes': total_episodes,
+        'episodes': episodes,
+    }
+
+
+async def get_streams(ep_id_encoded: str) -> dict:
+    """
+    Get video sources for an episode.
+    Decrypts the hidden token and fetches actual stream URLs.
+    """
+    if not ep_id_encoded:
+        return {'sources': [], 'dl_url': ''}
+    
+    if cloudscraper is None or BeautifulSoup is None:
+        raise ImportError("cloudscraper and beautifulsoup4 are required")
+    
+    try:
+        # Decode episode ID
+        ep_id = base64.b64decode(ep_id_encoded).decode()
+        parts = ep_id.split('/')
+        series_id = parts[0]
+        ep_num = parts[1]
+    except Exception as e:
+        log.error(f"Failed to decode episode ID: {e}")
+        return {'sources': [], 'dl_url': ''}
+    
+    page_url = f"{BASE_URL}/watch/{series_id}/episode-{ep_num}"
+    log.info(f"Fetching streams from {page_url}")
+    
+    try:
+        scraper = cloudscraper.create_scraper()
+        
+        # Fetch page
+        page_resp = scraper.get(page_url, timeout=30)
+        page_html = page_resp.text
+        
+        soup = BeautifulSoup(page_html, 'html.parser')
+        iframe = soup.find('iframe', class_='player_logic_item')
+        
+        if not iframe:
+            log.error(f"No iframe found in page")
+            return {'sources': [], 'dl_url': ''}
+        
+        iframe_src = iframe.get('src', '')
+        if not iframe_src:
+            log.error(f"No iframe src found")
+            return {'sources': [], 'dl_url': ''}
+        
+        # Fetch iframe
+        iframe_resp = scraper.get(iframe_src, timeout=30)
+        iframe_html = iframe_resp.text
+        
+        iframe_soup = BeautifulSoup(iframe_html, 'html.parser')
+        token_meta = iframe_soup.find('meta', attrs={'name': 'x-secure-token'})
+        
+        if not token_meta:
+            log.error(f"No token meta found in iframe")
+            return {'sources': [], 'dl_url': ''}
+        
+        secure_token = token_meta.get('content', '').replace('sha512-', '')
+        
+        # Decrypt using ROT13
+        rotated_sha = _rot13(secure_token)
+        decrypted_b64 = _rot13(base64.b64decode(rotated_sha).decode())
+        decrypted_json = base64.b64decode(decrypted_b64).decode()
+        
+        decrypted_data = json.loads(decrypted_json)
+        
+        # Make API call
+        api_url = decrypted_data.get('uri', 'https://hentaihaven.xxx/wp-content/plugins/player-logic/') + 'api.php'
+        
+        files = {
+            'action': (None, 'zarat_get_data_player_ajax'),
+            'a': (None, decrypted_data['en']),
+            'b': (None, decrypted_data['iv']),
+        }
+        
+        api_resp = scraper.post(api_url, files=files, timeout=30)
+        api_response = api_resp.json()
+        
+        sources = api_response.get('data', {}).get('sources', [])
+        thumbnail = api_response.get('data', {}).get('image', '')
+        
+        # Format sources
+        formatted_sources = []
+        for src in sources:
+            formatted_sources.append({
+                'label': src.get('label', ''),
+                'url': src.get('src', ''),
+                'type': src.get('type', ''),
+            })
+        
+        dl_url = formatted_sources[0]['url'] if formatted_sources else ''
+        
         return {
-            "name": slug,
-            "slug": slug,
-            "views": 0,
-            "poster_url": "",
-            "cover_url": "",
-            "description": "",
-            "released_date": "N/A",
-            "likes": 0,
-            "dislikes": 0,
-            "duration": "N/A",
-            "duration_ms": 0,
-            "brand": "N/A",
-            "tags": [],
-            "titles": [],
-            "episodes": [],
+            'sources': formatted_sources,
+            'thumbnail': thumbnail,
+            'dl_url': dl_url,
         }
     
-    # Parse episodes
-    episodes = []
-    ep_list = data.get("episodes", [])
-    if isinstance(ep_list, list):
-        for ep in ep_list:
-            if isinstance(ep, dict):
-                episodes.append({
-                    "name": ep.get("name", f"Episode {ep.get('number', 1)}"),
-                    "slug": ep.get("slug", ep.get("id", "")),
-                    "poster_url": ep.get("poster", ep.get("image", "")),
-                })
-            else:
-                # If episodes are just strings/IDs
-                episodes.append({
-                    "name": f"Episode {ep}",
-                    "slug": f"{slug}-{ep}",
-                    "poster_url": "",
-                })
-    
-    return {
-        "name": data.get("title", data.get("name", slug)),
-        "slug": slug,
-        "views": data.get("views", 0),
-        "poster_url": data.get("poster", data.get("image", "")),
-        "cover_url": data.get("cover", data.get("poster", "")),
-        "description": data.get("description", ""),
-        "released_date": data.get("released_date", "N/A"),
-        "likes": data.get("likes", 0),
-        "dislikes": data.get("dislikes", 0),
-        "duration": data.get("duration", "N/A"),
-        "duration_ms": data.get("duration_ms", 0),
-        "brand": data.get("brand", "N/A"),
-        "tags": data.get("tags", []),
-        "titles": data.get("titles", [data.get("title", data.get("name", slug))]),
-        "episodes": episodes,
-    }
-
-
-# ── Streams ─────────────────────────────────────────────────────────────
-
-async def get_streams(slug: str) -> dict:
-    """
-    Get stream URLs for a video via the hentai-api service.
-    """
-    log.info(f"Fetching streams for slug='{slug}'")
-    
-    url = f"{HENTAI_API_BASE}/api/hentaihaven/streams?id={slug}"
-    data = await _get_http(url, timeout=60)
-    
-    if not data:
-        log.warning(f"No streams found for slug='{slug}'")
-        return {"streams": [], "dl_url": ""}
-    
-    stream_urls = []
-    for stream in data.get("streams", []):
-        if isinstance(stream, dict):
-            stream_urls.append({
-                "url": stream.get("url", ""),
-                "height": stream.get("height", stream.get("quality", 0)),
-                "width": stream.get("width", 1280),
-                "kind": stream.get("kind", "hls"),
-                "filename": f"{slug}.mp4",
-                "filesize_mbs": stream.get("filesize_mbs", 0),
-                "is_downloadable": True,
-            })
-        else:
-            # If stream is just a URL string
-            stream_urls.append({
-                "url": stream,
-                "height": 0,
-                "width": 1280,
-                "kind": "hls",
-                "filename": f"{slug}.mp4",
-                "filesize_mbs": 0,
-                "is_downloadable": True,
-            })
-    
-    # Sort by quality (highest first)
-    stream_urls.sort(key=lambda s: s.get("height", 0) or 0, reverse=True)
-    dl_url = stream_urls[0]["url"] if stream_urls else ""
-    
-    log.info(f"Found {len(stream_urls)} streams")
-    return {
-        "streams": stream_urls,
-        "dl_url": dl_url,
-    }
+    except Exception as e:
+        log.error(f"Failed to get streams: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'sources': [], 'dl_url': ''}

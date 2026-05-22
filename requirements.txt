@@ -4,3 +4,5 @@ pymongo[srv]
 dnspython
 aiohttp>=3.9.0
 motor
+beautifulsoup4>=4.12.0
+cloudscraper>=1.1.0
