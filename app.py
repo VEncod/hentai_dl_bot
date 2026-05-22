@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 import logging
 
 from pyrogram import Client, filters, idle
@@ -24,6 +25,7 @@ from plugin.channels import (
 from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
+from utils.autodelete import start_autodelete_loop
 
 # ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -133,6 +135,9 @@ async def main():
         BotCommand("setlog", "Set log channel"),
         BotCommand("setchannel", "Set main archive channel"),
     ])
+
+    # Start auto-delete background task
+    asyncio.create_task(start_autodelete_loop(bot))
 
     log.info("Bot started successfully! Commands registered.")
     await idle()

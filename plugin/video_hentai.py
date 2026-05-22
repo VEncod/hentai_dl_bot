@@ -20,6 +20,7 @@ from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.db import get_db
 from utils.catalog import update_catalog
+from utils.autodelete import track_message
 from utils.logger import (
     log_download_start, log_download_progress, log_upload_complete,
     log_error, get_main_channel,
@@ -409,11 +410,12 @@ async def quality_download(client: Client, callback_query: CallbackQuery):
         elif file_id:
             await _safe_edit(callback_query, "📤 **Uploading from cache...** ⚡")
             try:
-                await client.send_document(
+                sent = await client.send_document(
                     chat_id=chat_id,
                     document=file_id,
                     caption="Downloaded via @hanime_dl_bot",
                 )
+                await track_message(chat_id, sent.id)
                 await log_upload_complete(client, log_msg_id, slug, file_id)
                 return
             except Exception:
@@ -546,13 +548,15 @@ async def quality_download(client: Client, callback_query: CallbackQuery):
             document=filename,
             caption=caption,
         )
+        await track_message(chat_id, sent.id)
 
         file_id = sent.document.file_id
         total_time = int(time.time() - start_time)
 
         await _safe_edit(
             callback_query,
-            f"✅ **Done!** ({file_size_mb:.1f} MB in {total_time}s)"
+            f"✅ **Done!** ({file_size_mb:.1f} MB in {total_time}s)\n"
+            f"⏳ Auto-deletes in 4 hours. Save it!"
         )
 
         # Save to MongoDB cache (with file_size for validation)

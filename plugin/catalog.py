@@ -15,6 +15,7 @@ from pyrogram.types import CallbackQuery
 
 from utils.catalog import get_catalog_episodes
 from utils.db import get_db
+from utils.autodelete import track_message
 
 log = logging.getLogger(__name__)
 
@@ -50,11 +51,12 @@ async def catalog_episodes_callback(client: Client, callback_query: CallbackQuer
         caption = f"📺 **{ep_name}**{size_str}\nDownloaded via @hanime_dl_bot"
 
         try:
-            await client.send_document(
+            sent = await client.send_document(
                 chat_id=user_id,
                 document=file_id,
                 caption=caption,
             )
+            await track_message(user_id, sent.id)
             sent_count += 1
         except Exception:
             log.warning("Failed to send episode %s to user %s", ep_slug, user_id)
@@ -76,9 +78,10 @@ async def catalog_episodes_callback(client: Client, callback_query: CallbackQuer
         await callback_query.answer("❌ No episodes available to send.", show_alert=True)
     else:
         try:
-            await client.send_message(
+            msg = await client.send_message(
                 chat_id=user_id,
-                text=f"✅ Sent **{sent_count}** episode(s) from this series.",
+                text=f"✅ Sent **{sent_count}** episode(s) from this series.\n⏳ Files auto-delete in 4 hours. Save what you need!",
             )
+            await track_message(user_id, msg.id)
         except Exception:
             pass
