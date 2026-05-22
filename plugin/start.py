@@ -20,6 +20,7 @@ from pyrogram.types import (
 
 from utils.db import get_db
 from utils.fsub import check_force_sub, send_force_sub_message
+from utils.autodelete import track_message
 
 log = logging.getLogger(__name__)
 
@@ -70,21 +71,24 @@ def _get_random_welcome_image() -> str | None:
 
 
 async def _send_welcome(client: Client, chat_id: int, text: str):
-    """Send welcome message with a random image."""
+    """Send welcome message with a random image. Tracked for auto-delete."""
     img = _get_random_welcome_image()
+    msg = None
     if img:
         try:
-            await client.send_photo(
+            msg = await client.send_photo(
                 chat_id=chat_id,
                 photo=img,
                 caption=text,
             )
-            return
         except Exception:
             log.warning("Failed to send welcome image")
 
-    # Fallback: text only
-    await client.send_message(chat_id=chat_id, text=text)
+    if not msg:
+        msg = await client.send_message(chat_id=chat_id, text=text)
+
+    if msg:
+        await track_message(chat_id, msg.id)
 
 
 async def checksub_callback(client, callback_query):

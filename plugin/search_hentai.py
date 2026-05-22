@@ -11,6 +11,7 @@ from api.hanime import search
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.logger import log_search
+from utils.autodelete import track_message
 
 log = logging.getLogger(__name__)
 
@@ -30,11 +31,13 @@ async def hentaisearch(client: Client, message: Message):
         results = await search(query)
     except Exception:
         log.exception("Search failed for query=%s", query)
-        await message.reply_text("❌ Search API is currently unavailable. Please try again later.")
+        msg = await message.reply_text("❌ Search API is currently unavailable. Please try again later.")
+        await track_message(message.chat.id, msg.id)
         return
 
     if not results:
-        await message.reply_text("No results found. Please check the spelling and try again.")
+        msg = await message.reply_text("No results found. Please check the spelling and try again.")
+        await track_message(message.chat.id, msg.id)
         return
 
     keyboard = []
@@ -44,7 +47,10 @@ async def hentaisearch(client: Client, message: Message):
         display_name = name if len(name) <= 60 else name[:57] + "..."
         keyboard.append([InlineKeyboardButton(display_name, callback_data=f"info_{slug}")])
 
-    await message.reply_text(
+    msg = await message.reply_text(
         f"🔍 Search results for **{query}** ({len(results)} found):",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    await track_message(message.chat.id, msg.id)
+    # Also track user's search message
+    await track_message(message.chat.id, message.id)

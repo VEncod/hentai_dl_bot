@@ -13,6 +13,7 @@ from api.hanime import details
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.poster import download_poster
+from utils.autodelete import track_message
 
 log = logging.getLogger(__name__)
 
@@ -26,12 +27,13 @@ async def _send_with_poster(client, chat_id, poster_url, text, keyboard):
             log.warning("Poster download returned None for %s", poster_url)
             return False
         log.info("Poster downloaded to %s, size=%d", poster_path, os.path.getsize(poster_path))
-        await client.send_photo(
+        msg = await client.send_photo(
             chat_id=chat_id,
             photo=poster_path,
             caption=text,
             reply_markup=keyboard,
         )
+        await track_message(chat_id, msg.id)
         return True
     except Exception:
         log.exception("Failed to send poster")
@@ -144,11 +146,12 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
         except Exception as e:
             log.warning("edit_message_text failed for %s: %s", slug, e)
             try:
-                await client.send_message(
+                msg = await client.send_message(
                     chat_id=callback_query.from_user.id,
                     text=text,
                     reply_markup=keyboard,
                 )
+                await track_message(callback_query.from_user.id, msg.id)
                 log.info("Sent as new message for %s", slug)
             except Exception:
                 log.exception("ALL methods failed for info_%s", slug)
@@ -211,10 +214,11 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
             await callback_query.edit_message_text(text, reply_markup=keyboard)
         except Exception:
             try:
-                await client.send_message(
+                msg = await client.send_message(
                     chat_id=callback_query.from_user.id,
                     text=text,
                     reply_markup=keyboard,
                 )
+                await track_message(callback_query.from_user.id, msg.id)
             except Exception:
                 log.exception("All methods failed for eps_%s", slug)

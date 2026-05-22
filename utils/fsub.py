@@ -137,12 +137,14 @@ async def check_force_sub(client: Client, user_id: int) -> tuple[bool, int | Non
 
 
 async def send_force_sub_message(client: Client, chat_id: int, channel_id: int):
+    from utils.autodelete import track_message
     link = await _get_channel_link(client, channel_id)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 Join Channel", url=link)],
         [InlineKeyboardButton("🔄 I've Joined", callback_data="checksub")],
     ])
-    await client.send_message(chat_id=chat_id, text=NOT_JOINED_TEXT, reply_markup=keyboard)
+    msg = await client.send_message(chat_id=chat_id, text=NOT_JOINED_TEXT, reply_markup=keyboard)
+    await track_message(chat_id, msg.id)
 
 
 def force_sub(func):
