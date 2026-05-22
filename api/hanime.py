@@ -1,6 +1,7 @@
 """
 HentaiHaven scraper - Python implementation.
 Uses cloudscraper for Cloudflare bypass and beautifulsoup4 for HTML parsing.
+Includes retry logic and rotating browser profiles for cloud server compatibility.
 
 Based on: https://github.com/sulvii/hentai-api
 """
@@ -8,8 +9,11 @@ Based on: https://github.com/sulvii/hentai-api
 import asyncio
 import json
 import logging
+import random
 import re
+import time
 from typing import Optional
+from urllib.parse import quote_plus
 
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -18,27 +22,90 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://hentaihaven.xxx"
 
+# Browser profiles to rotate through
+BROWSER_PROFILES = [
+    {'browser': 'chrome', 'platform': 'linux', 'desktop': True},
+    {'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+    {'browser': 'firefox', 'platform': 'linux', 'desktop': True},
+    {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
+]
+
 
 class HentaiHavenScraper:
-    """Scraper for hentaihaven.xxx"""
+    """Scraper for hentaihaven.xxx with Cloudflare bypass."""
     
     def __init__(self):
-        self.scraper = cloudscraper.create_scraper()
-        self.soup = None
+        self._create_scraper()
+        self._last_request = 0
     
-    def get(self, url: str, timeout: int = 30) -> str:
-        """Fetch HTML from URL using cloudscraper."""
-        try:
-            resp = self.scraper.get(url, timeout=timeout)
-            resp.raise_for_status()
-            return resp.text
-        except Exception as e:
-            log.error(f"Request failed: {e}")
-            raise
+    def _create_scraper(self):
+        """Create a new cloudscraper instance with random browser profile."""
+        profile = random.choice(BROWSER_PROFILES)
+        self.scraper = cloudscraper.create_scraper(
+            browser=profile,
+            delay=5,
+        )
+        # Set realistic headers
+        self.scraper.headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        })
+    
+    def get(self, url: str, timeout: int = 30, max_retries: int = 3) -> str:
+        """Fetch HTML from URL with retry logic and Cloudflare bypass."""
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Rate limiting - wait between requests
+                elapsed = time.time() - self._last_request
+                if elapsed < 1.5:
+                    time.sleep(1.5 - elapsed + random.uniform(0.1, 0.5))
+                
+                self._last_request = time.time()
+                resp = self.scraper.get(url, timeout=timeout)
+                
+                if resp.status_code == 200:
+                    return resp.text
+                elif resp.status_code == 403:
+                    log.warning(f"Got 403 on attempt {attempt + 1}/{max_retries}, rotating scraper...")
+                    self._create_scraper()
+                    time.sleep(2 + attempt * 2)
+                    continue
+                elif resp.status_code == 503:
+                    log.warning(f"Got 503 (Cloudflare challenge) on attempt {attempt + 1}/{max_retries}")
+                    time.sleep(3 + attempt * 2)
+                    continue
+                else:
+                    resp.raise_for_status()
+                    
+            except cloudscraper.exceptions.CloudflareChallengeError as e:
+                log.warning(f"Cloudflare challenge failed on attempt {attempt + 1}: {e}")
+                last_error = e
+                self._create_scraper()
+                time.sleep(3 + attempt * 3)
+            except Exception as e:
+                log.error(f"Request failed on attempt {attempt + 1}: {e}")
+                last_error = e
+                if attempt < max_retries - 1:
+                    self._create_scraper()
+                    time.sleep(2 + attempt * 2)
+        
+        raise Exception(f"Failed after {max_retries} attempts. Last error: {last_error}")
     
     def search(self, query: str) -> list[dict]:
         """Search hentaihaven.xxx for content."""
-        url = f"{BASE_URL}/?s={query}&post_type=wp-manga"
+        encoded_query = quote_plus(query)
+        url = f"{BASE_URL}/?s={encoded_query}&post_type=wp-manga"
         log.info(f"Searching for '{query}'")
         
         html = self.get(url)
@@ -55,19 +122,22 @@ class HentaiHavenScraper:
                 if not img:
                     continue
                 
-                cover = img.get('src', '')
+                cover = img.get('src', '') or img.get('data-src', '')
                 alt = img.get('alt', '')
                 title = alt.replace(' cover', '').strip() or 'Unknown'
                 
                 # Find the main watch link
-                link = content.find('a', href=re.compile(r'.+/watch/[^/]+/$'))
+                link = content.find('a', href=re.compile(r'.+/watch/[^/]+/?$'))
+                if not link:
+                    # Try broader match
+                    link = content.find('a', href=re.compile(r'hentaihaven'))
                 if not link:
                     continue
                 
                 href = link.get('href', '')
                 
                 # Extract series ID
-                match = re.search(r'/watch/([^/]+)/', href)
+                match = re.search(r'/watch/([^/]+)/?', href)
                 if not match:
                     continue
                 series_id = match.group(1)
@@ -108,7 +178,10 @@ class HentaiHavenScraper:
                 rating = 0.0
                 rating_span = content.find('span', class_='total_votes')
                 if rating_span:
-                    rating = float(rating_span.text.strip())
+                    try:
+                        rating = float(rating_span.text.strip())
+                    except (ValueError, TypeError):
+                        pass
                 
                 # Extract genres
                 genres = []
@@ -123,7 +196,7 @@ class HentaiHavenScraper:
                     'slug': series_id,
                     'title': title,
                     'name': title,
-                    'cover': cover.replace(' ', '%20'),
+                    'cover': cover.replace(' ', '%20') if cover else '',
                     'poster_url': cover,
                     'rating': rating,
                     'released': released,
@@ -161,12 +234,17 @@ class HentaiHavenScraper:
         
         # Extract cover
         cover = ''
-        for img in soup.find_all('img'):
-            src = img.get('src', '')
-            alt = img.get('alt', '')
-            if 'cover' in alt.lower() or 'cover' in src.lower():
-                cover = src
-                break
+        # Try multiple cover selectors
+        cover_img = soup.select_one('.summary_image img')
+        if cover_img:
+            cover = cover_img.get('src', '') or cover_img.get('data-src', '')
+        if not cover:
+            for img in soup.find_all('img'):
+                src = img.get('src', '') or img.get('data-src', '')
+                alt = img.get('alt', '')
+                if 'cover' in alt.lower() or 'cover' in src.lower() or series_id in src.lower():
+                    cover = src
+                    break
         
         # Extract summary
         summary = ""
@@ -174,6 +252,21 @@ class HentaiHavenScraper:
         if desc_el:
             p = desc_el.find('p')
             summary = p.text.strip() if p else desc_el.text.strip()
+        if not summary:
+            # Try manga-excerpt
+            excerpt = soup.find('div', class_='manga-excerpt')
+            if excerpt:
+                summary = excerpt.text.strip()
+        
+        # Extract genres
+        genres = []
+        genre_div = soup.find('div', class_='genres-content')
+        if genre_div:
+            for a in genre_div.find_all('a'):
+                genres.append({
+                    'name': a.text.strip(),
+                    'url': a.get('href', '')
+                })
         
         # Extract episodes
         episodes = []
@@ -191,11 +284,12 @@ class HentaiHavenScraper:
                 
                 # Extract episode ID from href
                 href = link.get('href', '')
-                parts = href.strip('/').split('/')
-                if len(parts) >= 2:
-                    ep_id = f"{parts[-2]}/{parts[-1]}"
+                # Try to extract episode slug
+                ep_match = re.search(r'/watch/([^/]+)/([^/]+)/?', href)
+                if ep_match:
+                    ep_id = f"{ep_match.group(1)}/{ep_match.group(2)}"
                 else:
-                    ep_id = f"{series_id}-ep{ep_number}"
+                    ep_id = f"{series_id}/episode-{ep_number}"
                 
                 date_el = ep_el.find('span', class_='chapter-release-date')
                 ep_date = date_el.text.strip() if date_el else ''
@@ -219,6 +313,7 @@ class HentaiHavenScraper:
             'cover': cover.replace(' ', '%20') if cover else '',
             'poster_url': cover,
             'summary': summary,
+            'genres': genres,
             'totalEpisodes': total_episodes,
             'episodes': episodes,
         }
@@ -228,39 +323,76 @@ class HentaiHavenScraper:
         if not ep_id:
             return {'sources': [], 'dl_url': ''}
         
-        # Parse episode ID (format: series-1)
-        parts = ep_id.rsplit('-', 1)
-        if len(parts) != 2:
-            log.error(f"Invalid episode ID: {ep_id}")
-            return {'sources': [], 'dl_url': ''}
+        # ep_id can be in format "series-id/episode-X" or "series-id-X"
+        if '/' in ep_id:
+            page_url = f"{BASE_URL}/watch/{ep_id}"
+        else:
+            # Parse episode ID (format: series-1)
+            parts = ep_id.rsplit('-', 1)
+            if len(parts) != 2:
+                log.error(f"Invalid episode ID: {ep_id}")
+                return {'sources': [], 'dl_url': ''}
+            series_id, ep_num = parts
+            page_url = f"{BASE_URL}/watch/{series_id}/episode-{ep_num}"
         
-        series_id, ep_num = parts
-        page_url = f"{BASE_URL}/watch/{series_id}/episode-{ep_num}"
         log.info(f"Fetching streams from {page_url}")
         
         html = self.get(page_url)
         soup = BeautifulSoup(html, 'html.parser')
         
-        # Find iframe
+        sources = []
+        
+        # Method 1: Find iframe player
         iframe = soup.find('iframe', class_='player_logic_item')
         if not iframe:
-            log.error("No iframe found")
-            return {'sources': [], 'dl_url': ''}
+            iframe = soup.find('iframe', attrs={'allowfullscreen': True})
+        if not iframe:
+            iframe = soup.find('iframe')
         
-        iframe_src = iframe.get('src', '')
-        if not iframe_src:
-            log.error("No iframe src found")
-            return {'sources': [], 'dl_url': ''}
+        if iframe:
+            iframe_src = iframe.get('src', '') or iframe.get('data-src', '')
+            if iframe_src:
+                if iframe_src.startswith('//'):
+                    iframe_src = 'https:' + iframe_src
+                sources.append({
+                    'url': iframe_src,
+                    'label': 'Stream',
+                    'type': 'iframe',
+                })
         
-        # Fetch iframe and decrypt (simplified - in production needs full decrypt)
-        # For now, return the iframe URL for manual inspection
+        # Method 2: Look for direct video sources in script tags
+        for script in soup.find_all('script'):
+            script_text = script.string or ''
+            # Look for video URLs in JavaScript
+            video_urls = re.findall(r'(?:src|file|url)\s*[:=]\s*["\']([^"\']+\.(?:mp4|m3u8)[^"\']*)["\']', script_text)
+            for vurl in video_urls:
+                if vurl.startswith('//'):
+                    vurl = 'https:' + vurl
+                sources.append({
+                    'url': vurl,
+                    'label': 'Direct',
+                    'type': 'mp4' if '.mp4' in vurl else 'hls',
+                })
+        
+        # Method 3: Look for download links
+        dl_links = soup.find_all('a', href=re.compile(r'\.mp4|download'))
+        for dl in dl_links:
+            href = dl.get('href', '')
+            if href and 'mp4' in href:
+                sources.append({
+                    'url': href,
+                    'label': dl.text.strip() or 'Download',
+                    'type': 'mp4',
+                })
+        
+        dl_url = sources[0]['url'] if sources else ''
+        
+        if not sources:
+            log.error(f"No video sources found for {ep_id}")
+        
         return {
-            'sources': [{
-                'url': iframe_src,
-                'label': 'unknown',
-                'type': 'iframe',
-            }],
-            'dl_url': iframe_src,
+            'sources': sources,
+            'dl_url': dl_url,
         }
 
 
@@ -282,13 +414,26 @@ def _get_scraper() -> HentaiHavenScraper:
     return _scraper
 
 
+def reset_scraper():
+    """Reset the scraper instance (useful after persistent 403 errors)."""
+    global _scraper
+    _scraper = None
+    log.info("Scraper instance reset")
+
+
 async def search(query: str, page: int = 0) -> list[dict]:
-    return _get_scraper().search(query)
+    """Search for hentai - runs in thread to avoid blocking."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_scraper().search, query)
 
 
 async def details(series_id: str) -> dict:
-    return _get_scraper().details(series_id)
+    """Get series details - runs in thread to avoid blocking."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_scraper().details, series_id)
 
 
 async def get_streams(ep_id: str) -> dict:
-    return _get_scraper().get_streams(ep_id)
+    """Get video streams - runs in thread to avoid blocking."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_scraper().get_streams, ep_id)
