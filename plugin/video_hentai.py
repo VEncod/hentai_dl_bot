@@ -391,6 +391,17 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         except Exception:
             pass  # HEAD failed, still try GET
 
+    # Re-check after HEAD validation
+    if not dl_url and not streams:
+        await _safe_edit(
+            callback_query,
+            "❌ **No download sources available for this video.**\n\n"
+            "The Pixeldrain link is dead and no HLS streams exist.\n"
+            "Try another episode or title."
+        )
+        await log_error(client, username, f"All sources dead for {slug}")
+        return
+
     if dl_url:
         log.info("Strategy 1: Pixeldrain for %s → %s", slug, dl_url)
         await _safe_edit(callback_query, f"⬇️ **Downloading via Pixeldrain...**\n\n{_progress_bar(5)}\n\n📁 **File:** {slug}.mp4")
