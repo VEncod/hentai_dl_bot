@@ -368,7 +368,29 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
              slug, dl_url, len(streams),
              [(s["kind"], s["height"], s["url"][:60]) for s in streams[:5]])
 
+    if not dl_url and not streams:
+        elapsed = int(time.time() - start_time)
+        await _safe_edit(
+            callback_query,
+            "❌ **No download sources available for this video.**\n\n"
+            "This title may be region-locked or not yet available for download on the server.\n"
+            "Try another episode or title."
+        )
+        await log_error(client, username, f"No streams/dl_url for {slug}")
+        return
+
     # ── Strategy 1: Pixeldrain (720p, fastest) ──────────────────────
+    if dl_url:
+        # Quick HEAD check to avoid wasting time on dead links
+        try:
+            async with aiohttp.ClientSession() as _sess:
+                async with _sess.head(dl_url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as _hr:
+                    if _hr.status == 404:
+                        log.warning("Pixeldrain 404 for %s — skipping", slug)
+                        dl_url = None
+        except Exception:
+            pass  # HEAD failed, still try GET
+
     if dl_url:
         log.info("Strategy 1: Pixeldrain for %s → %s", slug, dl_url)
         await _safe_edit(callback_query, f"⬇️ **Downloading via Pixeldrain...**\n\n{_progress_bar(5)}\n\n📁 **File:** {slug}.mp4")
