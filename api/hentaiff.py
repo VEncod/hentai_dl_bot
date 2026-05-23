@@ -64,30 +64,65 @@ class HentaiFFScraper:
         soup = BeautifulSoup(html, 'html.parser')
         
         results = []
-        for article in soup.find_all('article'):
-            title_tag = article.find('h2', class_='entry-title')
-            link_tag = article.find('a')
-            img_tag = article.find('img')
+        # hentaiff.com uses div.bsx elements for search results
+        for item in soup.find_all('div', class_='bsx'):
+            link_tag = item.find('a')
+            if not link_tag:
+                continue
             
-            if title_tag and link_tag:
-                title = title_tag.text.strip()
-                item_url = link_tag.get('href')
-                cover = img_tag.get('src') if img_tag else None
+            item_url = link_tag.get('href', '')
+            title = link_tag.get('title', '')
+            
+            # Fallback: get title from h2 tag
+            if not title:
+                h2_tag = item.find('h2')
+                if h2_tag:
+                    title = h2_tag.text.strip()
+            
+            img_tag = item.find('img')
+            cover = img_tag.get('src') if img_tag else None
 
-                # Extract ID from URL (e.g., /anime/fella-hame-lips/ -> fella-hame-lips)
-                match = re.search(r'/anime/([^/]+)/', item_url)
-                series_id = match.group(1) if match else None
+            # Extract ID from URL (e.g., /anime/fella-hame-lips/ -> fella-hame-lips)
+            match = re.search(r'/anime/([^/]+)/', item_url)
+            series_id = match.group(1) if match else None
 
-                if series_id:
-                    results.append({
-                        'id': series_id,
-                        'slug': series_id,
-                        'title': title,
-                        'name': title,
-                        'cover': cover,
-                        'poster_url': cover,
-                        'url': item_url,
-                    })
+            if series_id and title:
+                results.append({
+                    'id': series_id,
+                    'slug': series_id,
+                    'title': title,
+                    'name': title,
+                    'cover': cover,
+                    'poster_url': cover,
+                    'url': item_url,
+                })
+        
+        # Fallback: try article tags if no bsx results found
+        if not results:
+            for article in soup.find_all('article'):
+                link_tag = article.find('a')
+                h2_tag = article.find('h2')
+                img_tag = article.find('img')
+                
+                if link_tag:
+                    item_url = link_tag.get('href', '')
+                    title = link_tag.get('title', '') or (h2_tag.text.strip() if h2_tag else '')
+                    cover = img_tag.get('src') if img_tag else None
+                    
+                    match = re.search(r'/anime/([^/]+)/', item_url)
+                    series_id = match.group(1) if match else None
+                    
+                    if series_id and title:
+                        results.append({
+                            'id': series_id,
+                            'slug': series_id,
+                            'title': title,
+                            'name': title,
+                            'cover': cover,
+                            'poster_url': cover,
+                            'url': item_url,
+                        })
+        
         log.info(f"Found {len(results)} results")
         return results
 
