@@ -120,7 +120,7 @@ Send `/start` to your bot on Telegram. The **first user** to send `/start` autom
 - **[aiohttp](https://aiohttp.readthedocs.io/)** — Async HTTP client
 - **[FFmpeg](https://ffmpeg.org/)** — Video processing and HLS stream downloading
 - **[MongoDB](https://www.mongodb.com/)** — Database for users, cache, config, and archives
-- **[Hanime.tv API](https://hanime.tv/)** — Video search and streaming data
+- **[HentaiFF](https://hentaiff.com/)** — Video search and streaming data
 
 ---
 
@@ -130,4 +130,4 @@ See [LICENSE](LICENSE) for details.
 
 ---
 
-**⚡ Powered by Hanime.tv API & FFmpeg | 👨‍💻 Created by [Mr. Aman](https://t.me/Am_ankhan)**
+**⚡ **Powered by HentaiFF.com & FFmpeg | 👨‍💻 Created by [Mr. Aman](https://t.me/Am_ankhan)**

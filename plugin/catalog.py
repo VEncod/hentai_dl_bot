@@ -48,7 +48,7 @@ async def catalog_episodes_callback(client: Client, callback_query: CallbackQuer
             continue
 
         size_str = f" ({file_size / 1024 / 1024:.1f} MB)" if file_size else ""
-        caption = f"📺 **{ep_name}**{size_str}\nDownloaded via @hanime_dl_bot"
+        caption = f"📺 **{ep_name}**{size_str}\nDownloaded via @hentaiff_dl_bot"
 
         try:
             sent = await client.send_document(

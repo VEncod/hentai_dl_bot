@@ -397,7 +397,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             caption = (
                 f"📺 **{info['name']}**\n"
                 f"🏷 {tags_str}\n"
-                f"Downloaded via @hanime_dl_bot"
+                f"Downloaded via @hentaiff_dl_bot"
             )
         except Exception:
             series_name = _extract_series_nam                    caption="Downloaded via @hentaiff_dl_bot",
@@ -515,7 +515,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 await client.send_document(
                     chat_id=chat_id,
                     document=cached["file_id"],
-                    caption=f"📺 **{ep_name}**\nDownloaded via @hanime_dl_bot",
+                    caption=f"📺 **{ep_name}**\nDownloaded via @hentaiff_dl_bot",
                 )
                 succeeded += 1
                 continue
@@ -560,9 +560,9 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         try:
             ep_info = await details(ep_slug)
             tags_str = ", ".join(ep_info.get("tags", [])[:5])
-            caption = f"📺 **{ep_name}**\n🏷 {tags_str}\nDownloaded via @hanime_dl_bot"
+            caption = f"📺 **{ep_name}**\n🏷 {tags_str}\nDownloaded via @hentaiff_dl_bot"
         except Exception:
-            caption = f"📺 **{ep_name}**\nDownloaded via @hanime_dl_bot"
+            caption = f"📺 **{ep_name}**\nDownloaded via @hentaiff_dl_bot"
 
         try:
             sent = await client.send_document(

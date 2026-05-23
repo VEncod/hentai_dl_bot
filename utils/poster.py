@@ -1,7 +1,7 @@
 """
 Poster image helper.
 
-hanime-cdn.com blocks hotlinking (403 without Referer header).
+hentaiff.com poster image download helper.
 Telegram can't fetch these URLs directly, so we download first then upload.
 Also converts webp to jpg since Telegram rejects webp in send_photo.
 """
@@ -17,8 +17,8 @@ log = logging.getLogger(__name__)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://hanime.tv/",
-    "Origin": "https://hanime.tv",
+    "Referer": "https://hentaiff.com/",
+    "Origin": "https://hentaiff.com",
 }
 
 

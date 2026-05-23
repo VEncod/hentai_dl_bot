@@ -79,7 +79,7 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     poster = info["poster_url"]
     summary = info["description"]
     tags = info["tags"]
-    # Hentaiff.com does not provide a direct list of episodes in the same way hanime.tv did.
+    # Episodes are extracted from the series page if available.
     # We will assume each 'slug' represents a single anime entry for now.
     # If an anime has multiple parts/episodes, they are typically linked within the description.
     # The bot will treat each slug as a single downloadable unit.

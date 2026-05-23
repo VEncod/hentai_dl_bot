@@ -216,7 +216,7 @@ class HentaiFFScraper:
         return {'sources': sources, 'dl_url': sources[0]['url'] if sources else ''}
 
 
-# Helper function to extract numbers (if needed, similar to original hanime.py)
+# Helper function to extract numbers
 def _get_number(text: str) -> Optional[int]:
     match = re.search(r'\d+', text)
     if match:
