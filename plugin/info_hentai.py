@@ -93,7 +93,8 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
         f"**{name}**\n\n"
         f"📝 **Summary:** {summary}\n"
         f"🔖 **Tags:** {tags_str}\n\n"
-        f"🔗 **Link:** {BASE_URL}/anime/{slug}/
+        f"🔗 **Link:** {BASE_URL}/anime/{slug}/"
+
     )
 
     buttons = []
