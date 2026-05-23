@@ -15,7 +15,9 @@ from pyrogram.types import (
 
 import re
 
-from api.hanime import get_streams, details
+from api.hentaiff import HentaiFFScraper, BASE_URL
+
+hentaiff_scraper = HentaiFFScraper()
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.db import get_db
@@ -45,50 +47,36 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
     slug = callback_query.data.split("_", 1)[1]
 
     try:
-        data = await get_streams(slug)
+        data = hentaiff_scraper.get_streams(slug)
     except Exception:
         log.exception("Failed to fetch streams for slug=%s", slug)
         await callback_query.answer("❌ API unavailable, try again later.", show_alert=True)
         return
 
-    streams = data["streams"]
-    dl_url = data["dl_url"]
+    sources = data["sources"]
 
-    # Fix pixeldrain URL
-    if dl_url:
-        m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", dl_url)
-        if m:
-            dl_url = f"https://pixeldrain.com/api/file/{m.group(1)}"
-
-    if not streams and not dl_url:
+    if not sources:
         await callback_query.answer("No stream links available.", show_alert=True)
         return
 
     keyboard = []
-    seen_heights = set()
-    for stream in streams:
-        height = stream["height"]
-        url = stream["url"]
-        kind = stream["kind"]
+    for source in sources:
+        label = source["label"]
+        url = source["url"]
+        s_type = source["type"]
 
-        if not url or height in seen_heights:
-            continue
-        seen_heights.add(height)
-
-        label = f"{'▶️' if kind == 'hls' else '📥'} {height}p ({kind.upper()})"
-        if stream.get("filesize_mbs"):
-            label += f" — {stream['filesize_mbs']:.0f}MB"
-
+        if s_type == "iframe" or s_type == "iframe_decoded":
+            label = f"▶️ Stream ({label})"
+        elif s_type == "direct_download":
+            label = f"⬇️ Download ({label})"
+        
         keyboard.append([InlineKeyboardButton(label, url=url)])
-
-    if dl_url:
-        keyboard.append([InlineKeyboardButton("⬇️ Direct Download", url=dl_url)])
 
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"info_{slug}")])
 
     await callback_query.edit_message_text(
         f"▶️ Streaming **{slug}**\n"
-        f"https://hanime.tv/videos/hentai/{slug}\n\n"
+        f"{BASE_URL}/anime/{slug}/\n\n"
         "Please share the bot if you like it ☺️",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -178,8 +166,8 @@ async def _download_n_m3u8dl(url: str, filename: str) -> bool:
             "--tmp-dir", "/tmp",
             "--no-log",
             "--auto-select",
-            "-H", "Referer: https://hanime.tv/",
-            "-H", "Origin: https://hanime.tv",
+            "-H", f"Referer: {BASE_URL}/",
+            "-H", f"Origin: {BASE_URL}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -224,7 +212,7 @@ async def _download_hls_ffmpeg(url: str, filename: str) -> bool:
     try:
         process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
-            "-headers", "Referer: https://hanime.tv/\r\nOrigin: https://hanime.tv\r\n",
+            "-headers", f"Referer: {BASE_URL}/\r\nOrigin: {BASE_URL}\r\n",
             "-i", url,
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
@@ -301,51 +289,25 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     log_msg_id = await log_download_start(client, username, slug)
 
-    # Check cache first — validate before sending
-    cached = await db.Name.find_one({"name": slug})
-    if cached:
-        file_id = cached.get("file_id", "")
-        file_size = cached.get("file_size", 0)
 
-        # Reject cached entries with known bad size
-        if file_size and file_size < 50_000:
-            log.warning("Bad cache for %s (%d bytes), deleting", slug, file_size)
-            await db.Name.delete_one({"name": slug})
-            # Fall through to fresh download
-        elif file_id:
-            await _safe_edit(callback_query, "📤 **Uploading from cache...** ⚡")
-            try:
-                sent = await client.send_document(
-                    chat_id=chat_id,
-                    document=file_id,
-                    caption="Downloaded via @hanime_dl_bot",
-                )
-                await track_message(chat_id, sent.id)
-                await log_upload_complete(client, log_msg_id, slug, file_id)
-                return
-            except Exception:
-                log.exception("Failed to send cached file for %s — removing", slug)
-                await db.Name.delete_one({"name": slug})
-                await _safe_edit(callback_query, "🔄 **Cache error, re-downloading...**")
 
     # Fetch streams
     try:
-        data = await get_streams(slug)
+        data = hentaiff_scraper.get_streams(slug)
     except Exception:
         log.exception("Failed to fetch streams for slug=%s", slug)
         await _safe_edit(callback_query, "❌ API unavailable. Please try again later.")
         await log_error(client, username, f"Stream fetch failed for {slug}")
         return
 
-    streams = data["streams"]
-    dl_url = data["dl_url"]
+    sources = data["sources"]
+    dl_url = None
 
-    # Double-check: fix pixeldrain URL if not already fixed
-    if dl_url:
-        m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", dl_url)
-        if m:
-            dl_url = f"https://pixeldrain.com/api/file/{m.group(1)}"
-            log.info("Fixed pixeldrain URL to: %s", dl_url)
+    # Prioritize direct download links
+    direct_download_source = next((s for s in sources if s["type"] == "direct_download"), None)
+    if direct_download_source:
+        dl_url = direct_download_source["url"]
+        log.info("Using direct download URL: %s", dl_url)
 
     filename = f"{slug}.mp4"
     downloaded = False
@@ -356,87 +318,45 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         bar = _progress_bar(pct)
         await _safe_edit(
             callback_query,
-            f"⬇️ **Downloading...**\n\n"
-            f"{bar}\n\n"
-            f"⏱ **Elapsed:** {elapsed}s\n"
+            f"⬇️ **Downloading...**\\n\\n"
+            f"{bar}\\n\\n"
+            f"⏱ **Elapsed:** {elapsed}s\\n"
             f"📁 **File:** {slug}.mp4"
         )
         if log_msg_id:
             await log_download_progress(client, log_msg_id, username, slug, pct)
 
-    log.info("Streams for %s: dl_url=%s, stream_count=%d, streams=%s",
-             slug, dl_url, len(streams),
-             [(s["kind"], s["height"], s["url"][:60]) for s in streams[:5]])
+    log.info("Sources for %s: dl_url=%s, source_count=%d, sources=%s",
+             slug, dl_url, len(sources),
+             [(s["type"], s["label"], s["url"][:60]) for s in sources[:5]])
 
-    if not dl_url and not streams:
+    if not dl_url and not sources:
         elapsed = int(time.time() - start_time)
         await _safe_edit(
             callback_query,
-            "❌ **No download sources available for this video.**\n\n"
-            "This title may be region-locked or not yet available for download on the server.\n"
+            "❌ **No download sources available for this video.**\\n\\n"
+            "This title may be region-locked or not yet available for download on the server.\\n"
             "Try another episode or title."
         )
-        await log_error(client, username, f"No streams/dl_url for {slug}")
-        return
-
-    # ── Strategy 1: Pixeldrain (720p, fastest) ──────────────────────
-    if dl_url:
-        # Quick HEAD check to avoid wasting time on dead links
-        try:
-            async with aiohttp.ClientSession() as _sess:
-                async with _sess.head(dl_url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as _hr:
-                    if _hr.status == 404:
-                        log.warning("Pixeldrain 404 for %s — skipping", slug)
-                        dl_url = None
-        except Exception:
-            pass  # HEAD failed, still try GET
-
-    # Re-check after HEAD validation
-    if not dl_url and not streams:
-        await _safe_edit(
-            callback_query,
-            "❌ **No download sources available for this video.**\n\n"
-            "The Pixeldrain link is dead and no HLS streams exist.\n"
-            "Try another episode or title."
-        )
-        await log_error(client, username, f"All sources dead for {slug}")
+        await log_error(client, username, f"No sources/dl_url for {slug}")
         return
 
     if dl_url:
-        log.info("Strategy 1: Pixeldrain for %s → %s", slug, dl_url)
-        await _safe_edit(callback_query, f"⬇️ **Downloading via Pixeldrain...**\n\n{_progress_bar(5)}\n\n📁 **File:** {slug}.mp4")
-        if log_msg_id:
-            await log_download_progress(client, log_msg_id, username, slug, 5)
-        downloaded = await _download_direct(dl_url, filename, progress_cb=on_progress)
-        if not downloaded:
-            log.warning("Pixeldrain failed for %s", slug)
+        downloaded = await _download_direct(dl_url, filename, on_progress)
 
-    # ── Strategy 2: N_m3u8DL-RE for HLS ────────────────────────────
     if not downloaded:
-        hls_streams = [s for s in streams if s["kind"] == "hls" and s["url"]]
-        if hls_streams and os.path.exists(N_M3U8DL_RE):
-            stream = hls_streams[0]
-            log.info("Strategy 2: N_m3u8DL-RE %dp for %s", stream["height"], slug)
-            await _safe_edit(callback_query, f"⬇️ **Downloading {stream['height']}p HLS...**\n\n{_progress_bar(20)}")
-            downloaded = await _download_n_m3u8dl(stream["url"], filename)
-
-    # ── Strategy 3: MP4 direct streams ──────────────────────────────
-    if not downloaded:
-        mp4_streams = [s for s in streams if s["kind"] == "mp4" and s["url"]]
-        for stream in mp4_streams:
-            log.info("Strategy 3: MP4 %dp for %s", stream["height"], slug)
-            await _safe_edit(callback_query, f"⬇️ **Downloading {stream['height']}p MP4...**\n\n{_progress_bar(30)}")
-            downloaded = await _download_direct(stream["url"], filename, progress_cb=on_progress)
-            if downloaded:
+        # Fallback to iframe sources and try to extract video URL
+        for source in sources:
+            if source["type"] == "iframe" or source["type"] == "iframe_decoded":
+                iframe_url = source["url"]
+                log.info("Attempting to extract video from iframe: %s", iframe_url)
+                # This is complex and might require a headless browser or more advanced scraping
+                # For now, we will just log and skip if direct download is not available
+                log.warning("Iframe video extraction not implemented. Skipping iframe source.")
+                # If you want to implement this, you'd need to add a new function similar to _download_direct
+                # that can parse the iframe content and find the actual video URL.
+                # For now, we'll just break and report no download if direct isn't found.
                 break
-
-    # ── Strategy 4: ffmpeg HLS fallback ─────────────────────────────
-    if not downloaded:
-        hls_streams = [s for s in streams if s["kind"] == "hls" and s["url"]]
-        for stream in hls_streams:
-            log.info("Strategy 4: ffmpeg %dp for %s", stream["height"], slug)
-            await _safe_edit(callback_query, f"⬇️ **Downloading {stream['height']}p via ffmpeg...**\n\n{_progress_bar(40)}")
-            downloaded = await _download_hls_ffmpeg(stream["url"], filename)
             if downloaded:
                 break
 
@@ -480,9 +400,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 f"Downloaded via @hanime_dl_bot"
             )
         except Exception:
-            series_name = _extract_series_name(slug)
-            caption = "Downloaded via @hanime_dl_bot"
-
+            series_name = _extract_series_nam                    caption="Downloaded via @hentaiff_dl_bot",
         # Send to user
         sent = await client.send_document(
             chat_id=chat_id,

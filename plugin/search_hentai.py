@@ -7,7 +7,9 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
 )
 
-from api.hanime import search
+from api.hentaiff import HentaiFFScraper
+
+hentaiff_scraper = HentaiFFScraper()
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.logger import log_search
@@ -28,7 +30,7 @@ async def hentaisearch(client: Client, message: Message):
     await log_search(client, message.from_user.username, query)
 
     try:
-        results = await search(query)
+        results = hentaiff_scraper.search(query)
     except Exception:
         log.exception("Search failed for query=%s", query)
         msg = await message.reply_text("❌ Search API is currently unavailable. Please try again later.")
@@ -43,7 +45,7 @@ async def hentaisearch(client: Client, message: Message):
     keyboard = []
     for item in results[:20]:
         slug = item.get("slug", "")
-        name = item.get("name", "Unknown")
+        name = item.get("title", "Unknown")
         display_name = name if len(name) <= 60 else name[:57] + "..."
         keyboard.append([InlineKeyboardButton(display_name, callback_data=f"info_{slug}")])
 

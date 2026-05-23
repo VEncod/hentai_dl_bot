@@ -9,7 +9,9 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
 )
 
-from api.hanime import details
+from api.hentaiff import HentaiFFScraper
+
+hentaiff_scraper = HentaiFFScraper()
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.poster import download_poster
@@ -60,7 +62,9 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
 
     try:
         log.info("Fetching details for %s...", slug)
-        info = await details(slug)
+        info = hentaiff_scraper.details(slug)
+        if not info:
+            raise ValueError(f"No details found for slug={slug}")
         log.info("Got details: name=%s, episodes=%d, poster=%s",
                  info.get("name"), len(info.get("episodes", [])), bool(info.get("poster_url")))
     except Exception:
@@ -71,16 +75,15 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
             pass
         return
 
-    name = info["name"]
+    name = info["title"]
     poster = info["poster_url"]
-    views = f'{info["views"]:,}' if isinstance(info["views"], int) else info["views"]
-    released = info["released_date"]
-    likes = f'{info["likes"]:,}' if isinstance(info["likes"], int) else info["likes"]
-    dislikes = f'{info["dislikes"]:,}' if isinstance(info["dislikes"], int) else info["dislikes"]
-    duration = info["duration"]
-    brand = info["brand"]
+    summary = info["description"]
     tags = info["tags"]
-    episodes = info.get("episodes", [])
+    # Hentaiff.com does not provide a direct list of episodes in the same way hanime.tv did.
+    # We will assume each 'slug' represents a single anime entry for now.
+    # If an anime has multiple parts/episodes, they are typically linked within the description.
+    # The bot will treat each slug as a single downloadable unit.
+    episodes = [] # No direct episode list from hentaiff.com details
 
     tags_str = ", ".join(tags[:10]) if tags else "N/A"
     if len(tags) > 10:
@@ -88,37 +91,15 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
 
     text = (
         f"**{name}**\n\n"
-        f"👁 **Views:** {views}\n"
-        f"👍 **Likes:** {likes}  |  👎 **Dislikes:** {dislikes}\n"
-        f"⏱ **Duration:** {duration}\n"
-        f"📅 **Released:** {released}\n"
-        f"🏷 **Brand:** {brand}\n"
-        f"🔖 **Tags:** {tags_str}"
+        f"📝 **Summary:** {summary}\n"
+        f"🔖 **Tags:** {tags_str}\n\n"
+        f"🔗 **Link:** {BASE_URL}/anime/{slug}/
     )
 
     buttons = []
 
-    if len(episodes) > 1:
-        text += f"\n\n📂 **Episodes ({len(episodes)}):**"
-        for ep in episodes:
-            ep_slug = ep.get("slug", "")
-            ep_name = ep.get("name", "Unknown")
-            if not ep_slug:
-                continue
-            prefix = "▶️ " if ep_slug == slug else "📺 "
-            display = ep_name if len(ep_name) <= 55 else ep_name[:52] + "..."
-            buttons.append([InlineKeyboardButton(
-                f"{prefix}{display}",
-                callback_data=f"eps_{ep_slug}"
-            )])
-        # Batch download all episodes
-        buttons.append([InlineKeyboardButton(
-            f"⬇️ Download All {len(episodes)} Episodes",
-            callback_data=f"ball_{slug}"
-        )])
-    else:
-        buttons.append([InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{slug}")])
-        buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")])
+    buttons.append([InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{slug}")])
+    buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")])
 
     keyboard = InlineKeyboardMarkup(buttons)
 
@@ -170,7 +151,9 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
         pass
 
     try:
-        info = await details(slug)
+        info = hentaiff_scraper.details(slug)
+        if not info:
+            raise ValueError(f"No details found for slug={slug}")
     except Exception:
         log.exception("Details fetch failed for episode slug=%s", slug)
         try:
@@ -179,23 +162,18 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
             pass
         return
 
-    name = info["name"]
+    name = info["title"]
     poster = info["poster_url"]
-    duration = info["duration"]
-    episodes = info.get("episodes", [])
-
-    series_slug = episodes[0].get("slug", slug) if episodes else slug
 
     text = (
-        f"📺 **{name}**\n"
-        f"⏱ Duration: {duration}\n\n"
+        f"📺 **{name}**\n\n"
         "Choose an option:"
     )
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇️ Download", callback_data=f"dlt_{slug}")],
         [InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")],
-        [InlineKeyboardButton("⬅️ Back to Episodes", callback_data=f"info_{series_slug}")],
+        [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{slug}")],
     ])
 
     sent_photo = False
