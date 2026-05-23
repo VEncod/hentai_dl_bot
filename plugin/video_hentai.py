@@ -400,7 +400,8 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 f"Downloaded via @hentaiff_dl_bot"
             )
         except Exception:
-            series_name = _extract_series_nam                    caption="Downloaded via @hentaiff_dl_bot",
+            series_name = _extract_series_name(slug)
+            caption = f"📺 **{slug}**\nDownloaded via @hentaiff_dl_bot"
         # Send to user
         sent = await client.send_document(
             chat_id=chat_id,
