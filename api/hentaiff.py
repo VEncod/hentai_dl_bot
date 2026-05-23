@@ -9,6 +9,11 @@ from urllib.parse import quote_plus
 import base64
 
 import requests
+try:
+    import cloudscraper
+    HAS_CLOUDSCRAPER = True
+except ImportError:
+    HAS_CLOUDSCRAPER = False
 from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
@@ -19,12 +24,18 @@ class HentaiFFScraper:
     """Scraper for hentaiff.com."""
     
     def __init__(self):
-        self.session = requests.Session()
+        if HAS_CLOUDSCRAPER:
+            self.session = cloudscraper.create_scraper(
+                browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+            )
+            log.info("Using cloudscraper session")
+        else:
+            self.session = requests.Session()
+            log.info("Using requests session (cloudscraper not available)")
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
@@ -37,7 +48,7 @@ class HentaiFFScraper:
         self._last_request = 0
 
     def _get(self, url: str, timeout: int = 30, max_retries: int = 3) -> str:
-        """Fetch HTML from URL with retry logic."""
+        """Fetch HTML from URL with retry logic and Cloudflare bypass."""
         last_error = None
         for attempt in range(max_retries):
             try:
@@ -47,7 +58,14 @@ class HentaiFFScraper:
                 self._last_request = time.time()
                 resp = self.session.get(url, timeout=timeout)
                 resp.raise_for_status()
-                return resp.text
+                html = resp.text
+                # Check if we got a Cloudflare challenge page
+                if 'Just a moment' in html or 'challenge-platform' in html or 'cf-browser-verification' in html:
+                    log.warning(f"Cloudflare challenge detected on attempt {attempt + 1}")
+                    time.sleep(3 + attempt * 3)
+                    continue
+                log.debug(f"Got {len(html)} bytes from {url}")
+                return html
             except requests.exceptions.RequestException as e:
                 log.warning(f"Request failed on attempt {attempt + 1}/{max_retries}: {e}")
                 last_error = e
@@ -61,11 +79,14 @@ class HentaiFFScraper:
         log.info(f"Searching for '{query}' on {url}")
         
         html = self._get(url)
+        log.info(f"Got HTML response: {len(html)} bytes, title: {html[html.find('<title>'):html.find('</title>')+8][:80] if '<title>' in html else 'no title'}")
         soup = BeautifulSoup(html, 'html.parser')
         
         results = []
         # hentaiff.com uses div.bsx elements for search results
-        for item in soup.find_all('div', class_='bsx'):
+        bsx_items = soup.find_all('div', class_='bsx')
+        log.info(f"Found {len(bsx_items)} bsx items, {len(soup.find_all('article'))} articles")
+        for item in bsx_items:
             link_tag = item.find('a')
             if not link_tag:
                 continue
