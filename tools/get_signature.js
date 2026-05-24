@@ -14,6 +14,13 @@ const path = require('path');
 const https = require('https');
 
 const VENDOR_URL  = 'https://hanime-cdn.com/js/vendor.0130da3e01eaf5c7d570b6ed1becb5f4.min.js';
+const VENDOR_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/javascript, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://hanime.tv/',
+  'Origin': 'https://hanime.tv',
+};
 const CACHE_PATH  = path.join(__dirname, '.vendor_cache.js');
 const TIMEOUT_MS  = 8000;
 
@@ -92,7 +99,7 @@ function patchVendor(src) {
 /* ── download vendor.js ──────────────────────────────────────────────── */
 function downloadVendor() {
   return new Promise((resolve, reject) => {
-    https.get(VENDOR_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } }, res => {
+    https.get(VENDOR_URL, { headers: VENDOR_HEADERS }, res => {
       if (res.statusCode !== 200) return reject(new Error('HTTP ' + res.statusCode));
       let data = '';
       res.on('data', d => data += d);
