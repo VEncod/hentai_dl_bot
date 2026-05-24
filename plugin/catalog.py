@@ -80,7 +80,7 @@ async def catalog_episodes_callback(client: Client, callback_query: CallbackQuer
         try:
             msg = await client.send_message(
                 chat_id=user_id,
-                text=f"✅ Sent **{sent_count}** episode(s) from this series.\n⏳ Files auto-delete in 4 hours. Save what you need!",
+                text=f"✅ Sent **{sent_count}** episode(s) from this series.\n⏳ Files auto-delete in 30 minutes. Save what you need!",
             )
             await track_message(user_id, msg.id)
         except Exception:

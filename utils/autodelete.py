@@ -15,8 +15,8 @@ from utils.db import get_db
 
 log = logging.getLogger(__name__)
 
-# Delete messages after 4 hours
-DELETE_AFTER_HOURS = 4
+# Delete messages after 30 minutes
+DELETE_AFTER_MINUTES = 30
 # Check for expired messages every 5 minutes
 CHECK_INTERVAL_SECONDS = 300
 
@@ -28,7 +28,7 @@ async def track_message(chat_id: int, message_id: int, extra_data: dict = None):
         "chat_id": chat_id,
         "message_id": message_id,
         "created_at": datetime.now(timezone.utc),
-        "expires_at": datetime.now(timezone.utc) + timedelta(hours=DELETE_AFTER_HOURS),
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=DELETE_AFTER_MINUTES),
     }
     if extra_data:
         doc.update(extra_data)
@@ -41,7 +41,7 @@ async def track_messages(chat_id: int, message_ids: list[int], extra_data: dict 
         return
     db = get_db()
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(hours=DELETE_AFTER_HOURS)
+    expires = now + timedelta(minutes=DELETE_AFTER_MINUTES)
     docs = []
     for mid in message_ids:
         doc = {"chat_id": chat_id, "message_id": mid, "created_at": now, "expires_at": expires}
@@ -130,8 +130,8 @@ async def _cleanup_expired(client: Client):
 
 async def start_autodelete_loop(client: Client):
     """Background loop that deletes expired messages every CHECK_INTERVAL_SECONDS."""
-    log.info("Auto-delete loop started (delete after %dh, check every %ds)",
-             DELETE_AFTER_HOURS, CHECK_INTERVAL_SECONDS)
+    log.info("Auto-delete loop started (delete after %dm, check every %ds)",
+             DELETE_AFTER_MINUTES, CHECK_INTERVAL_SECONDS)
 
     # Create TTL index on expires_at for safety (MongoDB auto-cleanup backup)
     db = get_db()
