@@ -917,12 +917,6 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 caption=caption,
                 thumb=ep_thumb,
             )
-        finally:
-            if ep_thumb and os.path.exists(ep_thumb):
-                try:
-                    os.unlink(ep_thumb)
-                except OSError:
-                    pass
             file_id = sent.document.file_id
             await db.Name.update_one(
                 {"name": ep_slug},
@@ -959,6 +953,11 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             log.exception("Batch: upload failed for %s", ep_slug)
             failed += 1
         finally:
+            if ep_thumb and os.path.exists(ep_thumb):
+                try:
+                    os.unlink(ep_thumb)
+                except OSError:
+                    pass
             if os.path.exists(filename):
                 os.remove(filename)
 
