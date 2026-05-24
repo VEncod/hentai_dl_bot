@@ -26,6 +26,7 @@ from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
 from utils.autodelete import start_autodelete_loop, set_userbot
+from utils.session_store import load_session_string, save_session_string
 
 # ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -66,21 +67,37 @@ bot.mongo_url = MONGO_URL
 
 # ── Userbot client (optional) ────────────────────────────────────────────
 # Used solely to delete user messages / wipe chat history.
-# Set SESSION_STRING env var to enable. Generate it with: python gen_session.py
+# Set SESSION_STRING env var to enable, or it will be loaded from DB.
+# Generate it with: python gen_session.py
 userbot = None
-if SESSION_STRING:
-    userbot = Client(
-        "hentai_userbot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        plugins=None,
-    )
-    log.info("Userbot session configured — full chat wipe enabled")
 
 
 async def main():
     await init_db(MONGO_URL)
+
+    # ── Load or save session string ─────────────────────────────────────
+    global SESSION_STRING
+    db_session = await load_session_string()
+    if SESSION_STRING:
+        # Env var takes priority — save to DB for next time
+        if db_session != SESSION_STRING:
+            await save_session_string(SESSION_STRING)
+    elif db_session:
+        # Load from DB since env var is empty
+        SESSION_STRING = db_session
+        log.info("Session string loaded from database")
+
+    # Initialize userbot if session string is available
+    global userbot
+    if SESSION_STRING:
+        userbot = Client(
+            "hentai_userbot",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=SESSION_STRING,
+            plugins=None,
+        )
+        log.info("Userbot session configured — full chat wipe enabled")
 
     # ── Command handlers (registered FIRST — commands take priority) ────
     bot.add_handler(MessageHandler(start_command, filters.command("start")))
