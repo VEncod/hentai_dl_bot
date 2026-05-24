@@ -94,6 +94,11 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     buttons = []
 
     buttons.append([InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{slug}")])
+    
+    # Add batch download button if there are multiple episodes
+    if len(episodes) > 1:
+        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{slug}")])
+    
     buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")])
 
     keyboard = InlineKeyboardMarkup(buttons)
@@ -165,11 +170,28 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
         "Choose an option:"
     )
 
-    keyboard = InlineKeyboardMarkup([
+    # Get episode info to check if series has multiple episodes
+    series_info = None
+    try:
+        series_info = hanime_api.details(slug)
+    except Exception:
+        pass
+    
+    has_multiple_eps = series_info and len(series_info.get("episodes", [])) > 1
+    
+    buttons = [
         [InlineKeyboardButton("⬇️ Download", callback_data=f"dlt_{slug}")],
+    ]
+    
+    if has_multiple_eps:
+        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{slug}")])
+    
+    buttons.extend([
         [InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")],
         [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{slug}")],
     ])
+    
+    keyboard = InlineKeyboardMarkup(buttons)
 
     sent_photo = False
     if poster:

@@ -310,7 +310,8 @@ async def _download_direct(url: str, filename: str, progress_cb=None) -> bool:
 
                 downloaded = 0
                 start_time = time.time()
-                tracker = DownloadProgressTracker(total, start_time) if total > 0 else None
+                # Create tracker with total size for proper progress calculation
+                tracker = DownloadProgressTracker(total if total > 0 else 100_000_000, start_time)
 
                 with open(filename, "wb") as f:
                     async for chunk in resp.content.iter_chunked(256 * 1024):
@@ -757,7 +758,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             except Exception:
                 await db.Name.delete_one({"name": ep_slug})
 
-        # Fresh download
+        # Fresh download with progress
         try:
             data = hanime_api.get_streams(ep_slug)
         except Exception:
@@ -774,15 +775,30 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         streams = data["streams"]
         filename = f"{ep_slug}.mp4"
         downloaded = False
+        
+        # Progress callback for batch downloads
+        async def batch_progress(stats):
+            try:
+                bar = _progress_bar(stats["pct"])
+                await status_msg.edit_text(
+                    f"📥 **Batch Download**\n\n"
+                    f"{bar}\n\n"
+                    f"📺 Downloading: {ep_name}\n"
+                    f"📊 Progress: {i + 1}/{total}\n"
+                    f"✅ Done: {succeeded} | ❌ Failed: {failed}\n\n"
+                    f"⚡ Speed: {_format_speed(stats['speed'])} | ⏳ ETA: {_format_time(stats['eta'])}"
+                )
+            except Exception:
+                pass
 
         if dl_url:
-            downloaded = await _download_direct(dl_url, filename)
+            downloaded = await _download_direct(dl_url, filename, batch_progress)
         if not downloaded:
             for s in streams:
                 if s["kind"] == "hls":
-                    downloaded = await _download_n_m3u8dl(s["url"], filename)
+                    downloaded = await _download_n_m3u8dl(s["url"], filename, batch_progress)
                     if not downloaded:
-                        downloaded = await _download_hls_ffmpeg(s["url"], filename)
+                        downloaded = await _download_hls_ffmpeg(s["url"], filename, batch_progress)
                     if downloaded:
                         break
 
