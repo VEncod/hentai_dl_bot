@@ -78,6 +78,21 @@ async def update_catalog(
     tags: list[str],
 ) -> dict | None:
     log.info("update_catalog called for %s with poster_url=%s", slug, poster_url[:80] if poster_url else "NONE")
+    
+    # If no poster_url provided, try to fetch from API
+    if not poster_url:
+        try:
+            from api.hanime_api import HanimeAPI
+            api = HanimeAPI()
+            info = api.details(slug)
+            if info:
+                poster_url = (info.get('poster_url') or 
+                             info.get('cover_url') or 
+                             info.get('poster') or 
+                             '')
+                log.info("Fetched poster from API for %s: %s", slug, poster_url[:80] if poster_url else "NONE")
+        except Exception as e:
+            log.warning("Failed to fetch poster from API for %s: %s", slug, e)
     """
     Update the series catalog after a successful episode download.
 
@@ -159,25 +174,37 @@ async def update_catalog(
         poster_path = None
         try:
             # Try to download poster with fallback
+            log.info("Attempting to download poster for %s from: %s", series_slug, poster_url[:80] if poster_url else "NONE")
             poster_path = await download_poster(poster_url)
             
             if not poster_path and poster_url:
-                log.warning("Failed to download poster for %s, trying without poster", series_slug)
+                log.warning("Failed to download poster for %s from %s", series_slug, poster_url[:80])
 
             if poster_path:
-                msg = await client.send_photo(
-                    chat_id=main_channel,
-                    photo=poster_path,
-                    caption=caption,
-                    reply_markup=keyboard,
-                )
-                log.info("Sent catalog message with poster for %s", series_slug)
+                log.info("Poster downloaded successfully: %s (%d bytes)", poster_path, os.path.getsize(poster_path))
+                try:
+                    msg = await client.send_photo(
+                        chat_id=main_channel,
+                        photo=poster_path,
+                        caption=caption,
+                        reply_markup=keyboard,
+                    )
+                    log.info("Sent catalog message with poster for %s", series_slug)
+                except Exception as e:
+                    log.error("Failed to send_photo for %s: %s", series_slug, e)
+                    # Fallback to text message
+                    msg = await client.send_message(
+                        chat_id=main_channel,
+                        text=caption,
+                        reply_markup=keyboard,
+                    )
+                    log.info("Sent catalog text message as fallback for %s", series_slug)
             else:
-                # No poster available — send text-only message with emoji
-                text_with_emoji = f"🖼 {caption}"
+                # No poster available — send text-only message
+                log.info("No poster available, sending text-only catalog for %s", series_slug)
                 msg = await client.send_message(
                     chat_id=main_channel,
-                    text=text_with_emoji,
+                    text=caption,
                     reply_markup=keyboard,
                 )
                 log.info("Sent catalog message without poster for %s", series_slug)
