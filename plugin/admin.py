@@ -90,10 +90,16 @@ async def removeadmin_command(client: Client, message: Message):
 
 @admin_only
 async def clearcache_command(client: Client, message: Message):
-    """Clear all cached file IDs (forces fresh downloads)."""
+    """Clear all cached file IDs (forces fresh downloads). Preserves config including session string."""
     db = get_db()
+    # Only clear the Name collection (cached file IDs)
+    # Config collection (session_string, channels, etc.) is NOT touched
     result = await db.Name.delete_many({})
-    await message.reply_text(f"🗑 Cleared {result.deleted_count} cached entries. Next downloads will be fresh.")
+    await message.reply_text(
+        f"🗑 Cleared {result.deleted_count} cached entries.\n"
+        f"✅ Config (session, channels) preserved.\n"
+        f"Next downloads will be fresh."
+    )
 
 
 @admin_only
