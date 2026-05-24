@@ -72,9 +72,11 @@ async def _resolve_poster_url(slug: str, provided_url: str) -> str:
         from api.hanime_api import HanimeAPI
         api = HanimeAPI()
         info = api.details(slug)
+        # cover_url = tall portrait art (268x394) = series poster for channel
+        # poster_url = wide screenshot (1280x720) = episode thumbnail only
         url = (
-            info.get("poster_url")
-            or info.get("cover_url")
+            info.get("cover_url")
+            or info.get("poster_url")
             or info.get("cover")
             or ""
         )

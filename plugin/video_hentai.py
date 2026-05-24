@@ -535,7 +535,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                     f"📦 Already downloaded!\n"
                     f"Downloaded via @hanime_dl_bot"
                 )
-                thumb_url = info.get("cover_url") or info.get("poster_url") or ""
+                thumb_url = info.get("poster_url") or info.get("cover_url") or ""
                 if thumb_url:
                     thumb_path = await download_thumbnail(thumb_url)
             except Exception:
@@ -682,7 +682,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 f"Downloaded via @hanime_dl_bot"
             )
             # Episode thumbnail (cover_url = wide episode art, distinct from series poster)
-            thumb_url = info.get("cover_url") or info.get("poster_url") or ""
+            thumb_url = info.get("poster_url") or info.get("cover_url") or ""
             if thumb_url:
                 thumb_path = await download_thumbnail(thumb_url)
         except Exception:
@@ -729,7 +729,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             # Get poster URL with fallback to cover_url
             poster_url = ""
             if info:
-                poster_url = info.get("poster_url", "") or info.get("cover_url", "") or info.get("cover", "")
+                poster_url = info.get("cover_url", "") or info.get("poster_url", "") or info.get("cover", "")
             
             log.info("Updating catalog for %s with poster_url=%s", slug, poster_url[:60] if poster_url else "None")
             
@@ -825,7 +825,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             ep_thumb = None
             try:
                 ep_info_c = hanime_api.details(ep_slug)
-                thumb_url = ep_info_c.get("cover_url") or ep_info_c.get("poster_url") or ""
+                thumb_url = ep_info_c.get("poster_url") or ep_info_c.get("cover_url") or ""
                 if thumb_url:
                     ep_thumb = await download_thumbnail(thumb_url)
             except Exception:
@@ -904,7 +904,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             ep_info = hanime_api.details(ep_slug)
             tags_str = ", ".join(ep_info.get("tags", [])[:5])
             caption = f"{ep_name}\nTags: {tags_str}\nDownloaded via @hanime_dl_bot"
-            thumb_url = ep_info.get("cover_url") or ep_info.get("poster_url") or ""
+            thumb_url = ep_info.get("poster_url") or ep_info.get("cover_url") or ""
             if thumb_url:
                 ep_thumb = await download_thumbnail(thumb_url)
         except Exception:
@@ -934,7 +934,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 
                 poster_url = ""
                 if ep_info:
-                    poster_url = ep_info.get("poster_url", "") or ep_info.get("cover_url", "") or ep_info.get("cover", "")
+                    poster_url = ep_info.get("cover_url", "") or ep_info.get("poster_url", "") or ep_info.get("cover", "")
                 
                 await update_catalog(
                     client=client,
