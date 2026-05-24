@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pyrogram import Client
 from pyrogram.enums import MessagesFilter
 
-from utils.db import get_db
+from utils.db import get_hindi_db
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def get_userbot() -> Client | None:
 
 async def add_hindi_channel(channel_id: int, title: str = "") -> bool:
     """Add a channel to the Hindi dub search list."""
-    db = get_db()
+    db = get_hindi_db()
     await db.hindi_channels.update_one(
         {"channel_id": channel_id},
         {"$set": {
@@ -62,14 +62,14 @@ async def add_hindi_channel(channel_id: int, title: str = "") -> bool:
 
 async def remove_hindi_channel(channel_id: int) -> bool:
     """Remove a channel from the Hindi dub search list."""
-    db = get_db()
+    db = get_hindi_db()
     result = await db.hindi_channels.delete_one({"channel_id": channel_id})
     return result.deleted_count > 0
 
 
 async def list_hindi_channels() -> list[dict]:
     """List all configured Hindi dub channels."""
-    db = get_db()
+    db = get_hindi_db()
     channels = []
     async for doc in db.hindi_channels.find():
         channels.append(doc)
@@ -166,14 +166,14 @@ def _is_hindi_content(msg) -> bool:
 
 async def _check_cache(slug: str) -> dict | None:
     """Check if we have a cached Hindi dub for this slug."""
-    db = get_db()
+    db = get_hindi_db()
     return await db.hindi_cache.find_one({"slug": slug})
 
 
 async def _save_to_cache(slug: str, file_id: str, file_name: str,
                           channel_id: int, channel_title: str,
                           message_id: int, file_size: int = 0):
-    db = get_db()
+    db = get_hindi_db()
     await db.hindi_cache.update_one(
         {"slug": slug},
         {"$set": {
