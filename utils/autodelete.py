@@ -20,6 +20,31 @@ DELETE_AFTER_MINUTES = 30
 # Check for expired messages every 5 minutes
 CHECK_INTERVAL_SECONDS = 300
 
+# Optional userbot client — set by app.py if SESSION_STRING is configured.
+# When set, it handles deleting user-sent messages (bots can't do this in DMs).
+_userbot: Client | None = None
+
+
+def set_userbot(client: Client):
+    """Register the userbot client for deleting user messages."""
+    global _userbot
+    _userbot = client
+    log.info("Userbot registered for auto-delete")
+
+
+async def delete_user_message(chat_id: int, message_id: int):
+    """
+    Try to delete a user-sent message.
+    Uses userbot if available, otherwise tries the bot (fails silently in DMs).
+    """
+    client = _userbot
+    if client is None:
+        return
+    try:
+        await client.delete_messages(chat_id, message_id)
+    except Exception:
+        pass  # Message already gone or no permission
+
 
 async def track_message(chat_id: int, message_id: int, extra_data: dict = None):
     """Track a bot message for auto-deletion."""
@@ -76,29 +101,40 @@ async def delete_all_user_messages(client: Client, chat_id: int):
 
 
 async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids: list = None):
-    """Clear all tracked messages for a user. Call this when starting a new flow."""
+    """
+    Clear all tracked bot messages for a user.
+    If userbot is configured, also does a full revoke delete of the entire
+    private chat history (wipes both sides including user messages).
+    """
     preserve_set = set(preserve_message_ids or [])
     db = get_db()
     cursor = db.auto_delete.find({"chat_id": chat_id})
     deleted_count = 0
     message_ids = []
-    
+
     async for doc in cursor:
         mid = doc["message_id"]
         if mid not in preserve_set:
             message_ids.append(mid)
-    
+
     if message_ids:
         try:
             await client.delete_messages(chat_id, message_ids)
             deleted_count = len(message_ids)
-            log.info("Auto-delete: cleared %d old messages for chat %s", deleted_count, chat_id)
+            log.info("Auto-delete: cleared %d tracked messages for chat %s", deleted_count, chat_id)
         except Exception as e:
-            log.warning("Failed to clear messages for chat %s: %s", chat_id, e)
-        
-        # Remove from DB
+            log.warning("Failed to clear tracked messages for chat %s: %s", chat_id, e)
+
         await db.auto_delete.delete_many({"chat_id": chat_id, "message_id": {"$in": message_ids}})
-    
+
+    # If userbot is available, wipe the entire chat history (both sides)
+    if _userbot:
+        try:
+            await _userbot.delete_chat_history(chat_id)
+            log.info("Userbot: wiped full chat history for %s", chat_id)
+        except Exception as e:
+            log.warning("Userbot delete_chat_history failed for %s: %s", chat_id, e)
+
     return deleted_count
 
 

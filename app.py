@@ -25,7 +25,7 @@ from plugin.channels import (
 from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
-from utils.autodelete import start_autodelete_loop
+from utils.autodelete import start_autodelete_loop, set_userbot
 
 # ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -35,10 +35,11 @@ logging.basicConfig(
 log = logging.getLogger("hentai_dl_bot")
 
 # ── Environment variables ───────────────────────────────────────────────
-API_ID = os.environ.get("API_ID")
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URL = os.environ.get("MONGO_URL")
+API_ID         = os.environ.get("API_ID")
+API_HASH       = os.environ.get("API_HASH")
+BOT_TOKEN      = os.environ.get("BOT_TOKEN")
+MONGO_URL      = os.environ.get("MONGO_URL")
+SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
 _missing = [k for k, v in {
     "API_ID": API_ID,
@@ -61,8 +62,21 @@ bot = Client(
     bot_token=BOT_TOKEN,
     plugins=None,
 )
-
 bot.mongo_url = MONGO_URL
+
+# ── Userbot client (optional) ────────────────────────────────────────────
+# Used solely to delete user messages / wipe chat history.
+# Set SESSION_STRING env var to enable. Generate it with: python gen_session.py
+userbot = None
+if SESSION_STRING:
+    userbot = Client(
+        "hentai_userbot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+        plugins=None,
+    )
+    log.info("Userbot session configured — full chat wipe enabled")
 
 
 async def main():
@@ -118,6 +132,12 @@ async def main():
     # Set bot commands visible in Telegram menu
     await bot.start()
 
+    # Start userbot if configured
+    if userbot:
+        await userbot.start()
+        set_userbot(userbot)
+        log.info("Userbot started — user message deletion enabled")
+
     await bot.set_bot_commands([
         BotCommand("start", "Start the bot"),
         BotCommand("request", "Request access to use the bot"),
@@ -142,6 +162,8 @@ async def main():
     log.info("Bot started successfully! Commands registered.")
     await idle()
     await bot.stop()
+    if userbot:
+        await userbot.stop()
     log.info("Bot stopped.")
 
 

@@ -20,7 +20,7 @@ from pyrogram.types import (
 
 from utils.db import get_db
 from utils.fsub import check_force_sub, send_force_sub_message
-from utils.autodelete import track_message, clear_chat_history
+from utils.autodelete import track_message, clear_chat_history, delete_user_message
 
 log = logging.getLogger(__name__)
 
@@ -110,12 +110,9 @@ async def start_command(client: Client, message: Message):
     db = get_db()
     chat_id = message.chat.id
 
-    # Clear old messages first, then delete the /start command itself
+    # Clear old messages + wipe chat history (userbot handles user messages)
     await clear_chat_history(client, chat_id)
-    try:
-        await message.delete()
-    except Exception:
-        pass  # Fine — bot can't always delete user messages, just try
+    await delete_user_message(chat_id, message.id)
 
     # Force-sub check FIRST
     passed, channel_id = await check_force_sub(client, user.id)
