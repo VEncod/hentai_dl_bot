@@ -30,19 +30,17 @@ from utils.logger import (
 
 log = logging.getLogger(__name__)
 
-# Path to N_m3u8DL-RE binary (bundled in repo)
 N_M3U8DL_RE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "binary", "N_m3u8DL-RE")
 
-# Download timeout in seconds
-DOWNLOAD_TIMEOUT = 300  # 5 minutes max per download
-FFMPEG_TIMEOUT = 240    # 4 minutes for ffmpeg
-N_M3U8DL_TIMEOUT = 180  # 3 minutes for N_m3u8DL-RE (faster)
+DOWNLOAD_TIMEOUT = 300
+FFMPEG_TIMEOUT = 240
+N_M3U8DL_TIMEOUT = 180
 
+PROGRESS_UPDATE_INTERVAL = 2.0
+PROGRESS_MIN_PERCENT_STEP = 3
 
-# ── Stream link buttons ─────────────────────────────────────────────────
 
 async def hentailink(client: Client, callback_query: CallbackQuery):
-    """Show streaming links (link_<slug> callback)."""
     log.info("=== LINK HANDLER CALLED === data=%s", callback_query.data)
     slug = callback_query.data.split("_", 1)[1]
 
@@ -50,7 +48,7 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
         data = hanime_api.get_streams(slug)
     except Exception:
         log.exception("Failed to fetch streams for slug=%s", slug)
-        await callback_query.answer("❌ API unavailable, try again later.", show_alert=True)
+        await callback_query.answer("API unavailable, try again later.", show_alert=True)
         return
 
     sources = data.get("sources", [])
@@ -61,8 +59,7 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
         return
 
     keyboard = []
-    # Add hanime.tv watch link
-    keyboard.append([InlineKeyboardButton(f"▶️ Watch on Hanime.tv", url=f"{BASE_URL}/videos/hentai/{slug}")])
+    keyboard.append([InlineKeyboardButton("Watch on Hanime.tv", url=f"{BASE_URL}/videos/hentai/{slug}")])
 
     for source in sources:
         label = source.get("label", "Stream")
@@ -70,33 +67,221 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
         s_type = source.get("type", "")
 
         if s_type == "hls":
-            label = f"▶️ HLS Stream ({label})"
+            label = f"HLS Stream ({label})"
         elif s_type == "direct_download":
-            label = f"⬇️ Download ({label})"
+            label = f"Download ({label})"
         else:
-            label = f"▶️ Stream ({label})"
+            label = f"Stream ({label})"
         
         if url:
             keyboard.append([InlineKeyboardButton(label, url=url)])
 
-    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"info_{slug}")])
+    keyboard.append([InlineKeyboardButton("Back", callback_data=f"info_{slug}")])
 
     await callback_query.edit_message_text(
-        f"▶️ Streaming **{slug}**\n"
+        f"Streaming **{slug}**\n"
         f"{BASE_URL}/videos/hentai/{slug}\n\n"
-        "Please share the bot if you like it ☺️",
+        "Please share the bot if you like it",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-# ── Download helpers ────────────────────────────────────────────────────
+def _progress_bar(pct: float, length: int = 14) -> str:
+    filled = int(length * pct / 100)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {pct:.1f}%"
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _format_time(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m}m {s}s"
+    else:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        return f"{h}h {m}m"
+
+
+def _format_speed(bytes_per_sec: float) -> str:
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.0f} B/s"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    else:
+        return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+
+
+class DownloadProgressTracker:
+    def __init__(self, total_size: int, start_time: float):
+        self.total_size = total_size
+        self.start_time = start_time
+        self.downloaded = 0
+        self.last_update_time = start_time
+        self.last_update_downloaded = 0
+        self.current_speed = 0.0
+        self.eta_seconds = 0.0
+        self.last_reported_pct = -1.0
+        self.last_reported_time = 0.0
+    
+    def update(self, downloaded: int) -> dict:
+        now = time.time()
+        self.downloaded = downloaded
+        
+        time_delta = now - self.last_update_time
+        if time_delta > 0:
+            bytes_delta = downloaded - self.last_update_downloaded
+            self.current_speed = bytes_delta / time_delta
+        
+        if self.current_speed > 0 and self.total_size > 0:
+            remaining = self.total_size - downloaded
+            self.eta_seconds = remaining / self.current_speed
+        else:
+            self.eta_seconds = 0
+        
+        self.last_update_time = now
+        self.last_update_downloaded = downloaded
+        
+        pct = (downloaded / self.total_size * 100) if self.total_size > 0 else 0
+        elapsed = now - self.start_time
+        
+        return {
+            "pct": pct,
+            "downloaded": downloaded,
+            "total": self.total_size,
+            "speed": self.current_speed,
+            "eta": self.eta_seconds,
+            "elapsed": elapsed,
+        }
+    
+    def should_update_ui(self, pct: float) -> bool:
+        now = time.time()
+        time_since_last = now - self.last_reported_time
+        pct_change = abs(pct - self.last_reported_pct)
+        
+        if time_since_last >= PROGRESS_UPDATE_INTERVAL or pct_change >= PROGRESS_MIN_PERCENT_STEP:
+            self.last_reported_pct = pct
+            self.last_reported_time = now
+            return True
+        return False
+    
+    def format_message(self, stats: dict, title: str = "Downloading...", slug: str = "") -> str:
+        bar = _progress_bar(stats["pct"])
+        speed = _format_speed(stats["speed"])
+        eta = _format_time(stats["eta"]) if stats["eta"] > 0 else "calculating..."
+        elapsed = _format_time(stats["elapsed"])
+        downloaded = _format_size(stats["downloaded"])
+        total = _format_size(stats["total"]) if stats["total"] > 0 else "unknown"
+        
+        msg = (
+            f"{title}\n\n"
+            f"{bar}\n\n"
+            f"Size: {downloaded} / {total}\n"
+            f"Speed: {speed}\n"
+            f"Elapsed: {elapsed}\n"
+            f"ETA: {eta}"
+        )
+        if slug:
+            msg += f"\nFile: {slug}.mp4"
+        return msg
+
+
+class UploadProgressTracker:
+    def __init__(self, total_size: int, start_time: float):
+        self.total_size = total_size
+        self.start_time = start_time
+        self.uploaded = 0
+        self.last_update_time = start_time
+        self.last_update_uploaded = 0
+        self.current_speed = 0.0
+        self.eta_seconds = 0.0
+        self.last_reported_pct = -1.0
+        self.last_reported_time = 0.0
+    
+    def update(self, current: int, total: int) -> dict:
+        now = time.time()
+        self.uploaded = current
+        self.total_size = total
+        
+        time_delta = now - self.last_update_time
+        if time_delta > 0:
+            bytes_delta = current - self.last_update_uploaded
+            self.current_speed = bytes_delta / time_delta
+        
+        if self.current_speed > 0 and total > 0:
+            remaining = total - current
+            self.eta_seconds = remaining / self.current_speed
+        else:
+            self.eta_seconds = 0
+        
+        self.last_update_time = now
+        self.last_update_uploaded = current
+        
+        pct = (current / total * 100) if total > 0 else 0
+        elapsed = now - self.start_time
+        
+        return {
+            "pct": pct,
+            "uploaded": current,
+            "total": total,
+            "speed": self.current_speed,
+            "eta": self.eta_seconds,
+            "elapsed": elapsed,
+        }
+    
+    def should_update_ui(self, pct: float) -> bool:
+        now = time.time()
+        time_since_last = now - self.last_reported_time
+        pct_change = abs(pct - self.last_reported_pct)
+        
+        if time_since_last >= PROGRESS_UPDATE_INTERVAL or pct_change >= PROGRESS_MIN_PERCENT_STEP:
+            self.last_reported_pct = pct
+            self.last_reported_time = now
+            return True
+        return False
+    
+    def format_message(self, stats: dict, slug: str = "") -> str:
+        bar = _progress_bar(stats["pct"])
+        speed = _format_speed(stats["speed"])
+        eta = _format_time(stats["eta"]) if stats["eta"] > 0 else "calculating..."
+        elapsed = _format_time(stats["elapsed"])
+        uploaded = _format_size(stats["uploaded"])
+        total = _format_size(stats["total"]) if stats["total"] > 0 else "unknown"
+        
+        msg = (
+            f"Uploading...\n\n"
+            f"{bar}\n\n"
+            f"Size: {uploaded} / {total}\n"
+            f"Speed: {speed}\n"
+            f"Elapsed: {elapsed}\n"
+            f"ETA: {eta}"
+        )
+        if slug:
+            msg += f"\nFile: {slug}.mp4"
+        return msg
+
+
+async def _safe_edit(callback_query: CallbackQuery, text: str):
+    try:
+        await callback_query.edit_message_text(text)
+    except Exception:
+        pass
+
 
 async def _download_direct(url: str, filename: str, progress_cb=None) -> bool:
-    """
-    Download a file directly via aiohttp with timeout and progress.
-    Uses larger chunks and connection pooling for speed.
-    Validates that the response is actually a video (not HTML).
-    """
     try:
         timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=60)
         connector = aiohttp.TCPConnector(limit=5, force_close=False)
@@ -108,38 +293,40 @@ async def _download_direct(url: str, filename: str, progress_cb=None) -> bool:
             async with session.get(url) as resp:
                 resp.raise_for_status()
 
-                # Check content type — reject HTML responses
                 ct = resp.content_type or ""
                 if "text/html" in ct or "application/json" in ct:
                     log.error("URL returned %s instead of video: %s", ct, url)
                     return False
 
                 total = resp.content_length or 0
-                log.info("Downloading %s — size: %s, type: %s",
-                         url[:80], f"{total / 1024 / 1024:.1f}MB" if total else "unknown", ct)
+                log.info("Downloading %s - size: %s, type: %s",
+                         url[:80], _format_size(total) if total else "unknown", ct)
 
                 downloaded = 0
-                last_progress = 0
+                start_time = time.time()
+                tracker = DownloadProgressTracker(total, start_time) if total > 0 else None
 
                 with open(filename, "wb") as f:
                     async for chunk in resp.content.iter_chunked(256 * 1024):
                         f.write(chunk)
                         downloaded += len(chunk)
 
-                        if progress_cb and total > 0:
-                            pct = int(downloaded * 100 / total)
-                            if pct >= last_progress + 10:
-                                last_progress = pct
-                                await progress_cb(pct)
+                        if progress_cb and tracker:
+                            stats = tracker.update(downloaded)
+                            if tracker.should_update_ui(stats["pct"]):
+                                await progress_cb(stats)
 
-        # Final validation — reject tiny files (likely error pages)
+                if progress_cb and tracker:
+                    stats = tracker.update(downloaded)
+                    await progress_cb(stats)
+
         file_size = os.path.getsize(filename)
-        if file_size < 50_000:  # Less than 50KB is not a video
+        if file_size < 50_000:
             log.error("Downloaded file too small (%d bytes), likely not a video: %s", file_size, url)
             os.remove(filename)
             return False
 
-        log.info("Download complete: %s (%.1f MB)", filename, file_size / 1024 / 1024)
+        log.info("Download complete: %s (%s)", filename, _format_size(file_size))
         return True
     except asyncio.TimeoutError:
         log.error("Direct download timed out for url=%s", url)
@@ -149,20 +336,14 @@ async def _download_direct(url: str, filename: str, progress_cb=None) -> bool:
         return False
 
 
-async def _download_n_m3u8dl(url: str, filename: str) -> bool:
-    """
-    Download HLS stream using N_m3u8DL-RE (much faster than ffmpeg for HLS).
-    Uses multi-threaded downloading.
-    """
+async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None) -> bool:
     if not os.path.exists(N_M3U8DL_RE):
         log.warning("N_m3u8DL-RE binary not found at %s", N_M3U8DL_RE)
         return False
 
     try:
-        # N_m3u8DL-RE with optimized settings:
-        # --thread-count 8: parallel segment downloads
-        # --download-retry-count 3: retry failed segments
-        # --tmp-dir: use /tmp for speed
+        start_time = time.time()
+        
         process = await asyncio.create_subprocess_exec(
             N_M3U8DL_RE,
             url,
@@ -179,6 +360,26 @@ async def _download_n_m3u8dl(url: str, filename: str) -> bool:
             stderr=asyncio.subprocess.PIPE,
         )
 
+        if progress_cb:
+            expected_duration = 90
+            tracker = DownloadProgressTracker(100, start_time)
+            
+            async def monitor_progress():
+                while process.returncode is None:
+                    await asyncio.sleep(2)
+                    elapsed = time.time() - start_time
+                    estimated_pct = min(95, (elapsed / expected_duration) * 100)
+                    stats = tracker.update(int(estimated_pct))
+                    stats["pct"] = estimated_pct
+                    stats["downloaded"] = int(estimated_pct)
+                    stats["total"] = 100
+                    stats["speed"] = 0
+                    stats["eta"] = max(0, expected_duration - elapsed)
+                    if tracker.should_update_ui(estimated_pct):
+                        await progress_cb(stats)
+            
+            monitor_task = asyncio.create_task(monitor_progress())
+        
         try:
             _, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=N_M3U8DL_TIMEOUT
@@ -188,12 +389,18 @@ async def _download_n_m3u8dl(url: str, filename: str) -> bool:
             process.kill()
             await process.wait()
             return False
+        finally:
+            if progress_cb:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
 
         if process.returncode != 0:
             log.error("N_m3u8DL-RE failed (rc=%d): %s", process.returncode, stderr.decode(errors="replace")[-500:])
             return False
 
-        # N_m3u8DL-RE may output with different extension, find the file
         stem = Path(filename).stem
         for ext in [".mp4", ".mkv", ".ts"]:
             candidate = stem + ext
@@ -202,7 +409,6 @@ async def _download_n_m3u8dl(url: str, filename: str) -> bool:
                     os.rename(candidate, filename)
                 return True
 
-        # Check if output file exists directly
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
             return True
 
@@ -214,9 +420,10 @@ async def _download_n_m3u8dl(url: str, filename: str) -> bool:
         return False
 
 
-async def _download_hls_ffmpeg(url: str, filename: str) -> bool:
-    """Download HLS stream via ffmpeg with proper timeout (fallback)."""
+async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None) -> bool:
     try:
+        start_time = time.time()
+        
         process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
             "-headers", f"Referer: {BASE_URL}/\r\nOrigin: {BASE_URL}\r\n",
@@ -229,6 +436,26 @@ async def _download_hls_ffmpeg(url: str, filename: str) -> bool:
             stderr=asyncio.subprocess.PIPE,
         )
 
+        if progress_cb:
+            expected_duration = 120
+            tracker = DownloadProgressTracker(100, start_time)
+            
+            async def monitor_progress():
+                while process.returncode is None:
+                    await asyncio.sleep(2)
+                    elapsed = time.time() - start_time
+                    estimated_pct = min(95, (elapsed / expected_duration) * 100)
+                    stats = tracker.update(int(estimated_pct))
+                    stats["pct"] = estimated_pct
+                    stats["downloaded"] = int(estimated_pct)
+                    stats["total"] = 100
+                    stats["speed"] = 0
+                    stats["eta"] = max(0, expected_duration - elapsed)
+                    if tracker.should_update_ui(estimated_pct):
+                        await progress_cb(stats)
+            
+            monitor_task = asyncio.create_task(monitor_progress())
+        
         try:
             _, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=FFMPEG_TIMEOUT
@@ -238,6 +465,13 @@ async def _download_hls_ffmpeg(url: str, filename: str) -> bool:
             process.kill()
             await process.wait()
             return False
+        finally:
+            if progress_cb:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
 
         if process.returncode != 0:
             log.error("ffmpeg failed: %s", stderr.decode(errors="replace")[-500:])
@@ -250,29 +484,11 @@ async def _download_hls_ffmpeg(url: str, filename: str) -> bool:
 
 
 def _extract_series_name(slug: str) -> str:
-    """Extract series name from slug (remove trailing episode number)."""
     parts = slug.rsplit("-", 1)
     if len(parts) == 2 and parts[1].isdigit():
         return parts[0]
     return slug
 
-
-def _progress_bar(pct: int, length: int = 12) -> str:
-    """Generate a stylish progress bar."""
-    filled = int(length * pct / 100)
-    bar = "█" * filled + "░" * (length - filled)
-    return f"[{bar}] {pct}%"
-
-
-async def _safe_edit(callback_query: CallbackQuery, text: str):
-    """Edit message, ignoring 'message not modified' errors."""
-    try:
-        await callback_query.edit_message_text(text)
-    except Exception:
-        pass
-
-
-# ── Download handler ────────────────────────────────────────────────────
 
 async def hentaidl(client: Client, callback_query: CallbackQuery):
     """Download the video directly via Pixeldrain (dlt_<slug>)."""
@@ -282,7 +498,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
     from utils.auth import is_approved
     user_id = callback_query.from_user.id
     if not await is_approved(user_id):
-        await callback_query.answer("⛔ No access.", show_alert=True)
+        await callback_query.answer("No access.", show_alert=True)
         return
 
     slug = callback_query.data.split("_", 1)[1]
@@ -292,18 +508,16 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     start_time = time.time()
 
-    await _safe_edit(callback_query, f"⏳ **Downloading...**\n\n{_progress_bar(0)}")
+    await _safe_edit(callback_query, f"Preparing download...\n\n{_progress_bar(0)}")
 
     log_msg_id = await log_download_start(client, username, slug)
-
-
 
     # Fetch streams
     try:
         data = hanime_api.get_streams(slug)
     except Exception:
         log.exception("Failed to fetch streams for slug=%s", slug)
-        await _safe_edit(callback_query, "❌ API unavailable. Please try again later.")
+        await _safe_edit(callback_query, "API unavailable. Please try again later.")
         await log_error(client, username, f"Stream fetch failed for {slug}")
         return
 
@@ -318,7 +532,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         elapsed = int(time.time() - start_time)
         await _safe_edit(
             callback_query,
-            "❌ **No download sources available for this video.**\n\n"
+            "No download sources available for this video.\n\n"
             "This title may be region-locked or not yet available for download on the server.\n"
             "Try another episode or title."
         )
@@ -328,86 +542,95 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
     filename = f"{slug}.mp4"
     downloaded = False
 
-    # Progress callback with stylish bar
-    async def on_progress(pct):
-        elapsed = int(time.time() - start_time)
-        bar = _progress_bar(pct)
-        await _safe_edit(
-            callback_query,
-            f"⬇️ **Downloading...**\n\n"
-            f"{bar}\n\n"
-            f"⏱ **Elapsed:** {elapsed}s\n"
-            f"📁 **File:** {slug}.mp4"
-        )
+    # Progress callback with detailed stats
+    async def on_progress(stats):
+        msg = tracker.format_message(stats, title="Downloading...", slug=slug)
+        await _safe_edit(callback_query, msg)
         if log_msg_id:
-            await log_download_progress(client, log_msg_id, username, slug, pct)
+            await log_download_progress(client, log_msg_id, username, slug, stats["pct"])
 
-    # Try direct download first (if URL is a direct mp4 link)
+    # Try direct download first
     if dl_url and not dl_url.endswith('.m3u8'):
+        tracker = DownloadProgressTracker(0, start_time)
         downloaded = await _download_direct(dl_url, filename, on_progress)
 
-    # Try HLS download using N_m3u8DL-RE or ffmpeg
+    # Try HLS download
     if not downloaded:
         hls_url = dl_url if dl_url else None
         if not hls_url:
-            # Find best HLS stream
             for s in streams:
                 if s.get('kind') == 'hls' and s.get('url'):
                     hls_url = s['url']
                     break
         if hls_url:
             log.info("Attempting HLS download: %s", hls_url[:80])
-            downloaded = await _download_n_m3u8dl(hls_url, filename)
+            tracker = DownloadProgressTracker(0, start_time)
+            downloaded = await _download_n_m3u8dl(hls_url, filename, on_progress)
             if not downloaded:
-                downloaded = await _download_hls_ffmpeg(hls_url, filename)
+                downloaded = await _download_hls_ffmpeg(hls_url, filename, on_progress)
 
-    # ── Failed ──────────────────────────────────────────────────────
+    # Failed
     if not downloaded:
         elapsed = int(time.time() - start_time)
-        await _safe_edit(callback_query, f"❌ Download failed after {elapsed}s. No working streams found.")
+        await _safe_edit(callback_query, f"Download failed after {elapsed}s. No working streams found.")
         await log_error(client, username, f"All download strategies failed for {slug}")
         if os.path.exists(filename):
             os.remove(filename)
         return
 
     if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-        await _safe_edit(callback_query, "❌ Download produced an empty file.")
+        await _safe_edit(callback_query, "Download produced an empty file.")
         await log_error(client, username, f"Empty file for {slug}")
         if os.path.exists(filename):
             os.remove(filename)
         return
 
-    # ── Upload ──────────────────────────────────────────────────────
+    # Upload with progress
     try:
-        file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+        file_size = os.path.getsize(filename)
+        file_size_mb = file_size / (1024 * 1024)
         elapsed = int(time.time() - start_time)
+        
+        # Create upload progress tracker
+        upload_tracker = UploadProgressTracker(file_size, time.time())
+        
+        async def upload_progress(current, total):
+            stats = upload_tracker.update(current, total)
+            if upload_tracker.should_update_ui(stats["pct"]):
+                msg = upload_tracker.format_message(stats, slug=slug)
+                await _safe_edit(callback_query, msg)
+                if log_msg_id:
+                    await log_download_progress(client, log_msg_id, username, slug, 90 + stats["pct"] * 0.1)
+
         await _safe_edit(
             callback_query,
-            f"📤 **Uploading...** ({file_size_mb:.1f} MB)\n"
-            f"⬇️ Downloaded in {elapsed}s"
+            f"Uploading... ({file_size_mb:.1f} MB)\n"
+            f"Downloaded in {elapsed}s"
         )
         if log_msg_id:
             await log_download_progress(client, log_msg_id, username, slug, 90)
 
-        # Get video details for caption and catalog
+        # Get video details
         info = None
         try:
             info = hanime_api.details(slug)
             series_name = _extract_series_name(slug)
             tags_str = ", ".join(info.get("tags", [])[:5])
             caption = (
-                f"📺 **{info['name']}**\n"
-                f"🏷 {tags_str}\n"
+                f"{info['name']}\n"
+                f"Tags: {tags_str}\n"
                 f"Downloaded via @hanime_dl_bot"
             )
         except Exception:
             series_name = _extract_series_name(slug)
-            caption = f"📺 **{slug}**\nDownloaded via @hanime_dl_bot"
-        # Send to user
+            caption = f"{slug}\nDownloaded via @hanime_dl_bot"
+        
+        # Send to user with progress callback
         sent = await client.send_document(
             chat_id=chat_id,
             document=filename,
             caption=caption,
+            progress=upload_progress,
         )
         await track_message(chat_id, sent.id)
 
@@ -416,18 +639,18 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
         await _safe_edit(
             callback_query,
-            f"✅ **Done!** ({file_size_mb:.1f} MB in {total_time}s)\n"
-            f"⏳ Auto-deletes in 4 hours. Save it!"
+            f"Done! ({file_size_mb:.1f} MB in {total_time}s)\n"
+            f"Auto-deletes in 4 hours. Save it!"
         )
 
-        # Save to MongoDB cache (with file_size for validation)
+        # Save to MongoDB cache
         await db.Name.update_one(
             {"name": slug},
             {"$set": {"name": slug, "file_id": file_id, "file_size": sent.document.file_size}},
             upsert=True,
         )
 
-        # Update series catalog (creates/updates channel message)
+        # Update series catalog
         try:
             await update_catalog(
                 client=client,
@@ -445,14 +668,12 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     except Exception:
         log.exception("Upload failed for %s", slug)
-        await _safe_edit(callback_query, "❌ Something went wrong during upload.")
+        await _safe_edit(callback_query, "Something went wrong during upload.")
         await log_error(client, username, f"Upload failed for {slug}")
     finally:
         if os.path.exists(filename):
             os.remove(filename)
 
-
-# ── Batch download all episodes ─────────────────────────────────────────
 
 async def batch_download(client: Client, callback_query: CallbackQuery):
     """Download all episodes of a series (ball_<slug> callback)."""
@@ -464,7 +685,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
 
     from utils.auth import is_approved
     if not await is_approved(chat_id):
-        await callback_query.answer("⛔ No access.", show_alert=True)
+        await callback_query.answer("No access.", show_alert=True)
         return
 
     try:
@@ -477,7 +698,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         info = hanime_api.details(slug)
     except Exception:
         log.exception("Failed to get details for batch %s", slug)
-        await callback_query.answer("❌ API error", show_alert=True)
+        await callback_query.answer("API error", show_alert=True)
         return
 
     episodes = info.get("episodes", [])
@@ -490,7 +711,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
 
     status_msg = await client.send_message(
         chat_id=chat_id,
-        text=f"📥 **Batch Download Started**\n\nEpisodes: {total}\nProgress: 0/{total}",
+        text=f"Batch Download Started\n\nEpisodes: {total}\nProgress: 0/{total}",
     )
 
     db = get_db()
@@ -503,9 +724,9 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
 
         try:
             await status_msg.edit_text(
-                f"📥 **Batch Download**\n\n"
-                f"⬇️ Downloading: **{ep_name}** ({i + 1}/{total})\n"
-                f"✅ Done: {succeeded} | ❌ Failed: {failed}"
+                f"Batch Download\n\n"
+                f"Downloading: {ep_name} ({i + 1}/{total})\n"
+                f"Done: {succeeded} | Failed: {failed}"
             )
         except Exception:
             pass
@@ -517,7 +738,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 await client.send_document(
                     chat_id=chat_id,
                     document=cached["file_id"],
-                    caption=f"📺 **{ep_name}**\nDownloaded via @hanime_dl_bot",
+                    caption=f"{ep_name}\nDownloaded via @hanime_dl_bot",
                 )
                 succeeded += 1
                 continue
@@ -562,9 +783,9 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         try:
             ep_info = hanime_api.details(ep_slug)
             tags_str = ", ".join(ep_info.get("tags", [])[:5])
-            caption = f"📺 **{ep_name}**\n🏷 {tags_str}\nDownloaded via @hanime_dl_bot"
+            caption = f"{ep_name}\nTags: {tags_str}\nDownloaded via @hanime_dl_bot"
         except Exception:
-            caption = f"📺 **{ep_name}**\nDownloaded via @hanime_dl_bot"
+            caption = f"{ep_name}\nDownloaded via @hanime_dl_bot"
 
         try:
             sent = await client.send_document(
@@ -588,10 +809,10 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
 
     try:
         await status_msg.edit_text(
-            f"✅ **Batch Download Complete!**\n\n"
-            f"📺 Total: {total}\n"
-            f"✅ Success: {succeeded}\n"
-            f"❌ Failed: {failed}"
+            f"Batch Download Complete!\n\n"
+            f"Total: {total}\n"
+            f"Success: {succeeded}\n"
+            f"Failed: {failed}"
         )
     except Exception:
         pass
