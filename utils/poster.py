@@ -10,10 +10,15 @@ import logging
 import os
 import subprocess
 import tempfile
+from io import BytesIO
 
 import aiohttp
 
 log = logging.getLogger(__name__)
+
+# Use a dedicated temp directory that we control
+POSTER_TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tmp_posters")
+os.makedirs(POSTER_TEMP_DIR, exist_ok=True)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -52,47 +57,40 @@ async def download_poster(url: str) -> str | None:
                 elif "webp" in ct:
                     ext = ".webp"
 
-                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                try:
-                    total_size = 0
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        tmp.write(chunk)
-                        total_size += len(chunk)
-                    tmp.close()
-                    
-                    log.info("Poster downloaded to %s, raw size=%d bytes", tmp.name, total_size)
+                # Download to memory first, then write to file
+                log.info("Reading poster data into memory...")
+                data = await resp.read()
+                log.info("Poster data read: %d bytes", len(data))
+                
+                if len(data) < 1000:
+                    log.warning("Poster data too small (%d bytes)", len(data))
+                    return None
+                
+                # Write to our dedicated temp directory
+                tmp_path = os.path.join(POSTER_TEMP_DIR, f"poster_{os.urandom(8).hex()}{ext}")
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+                log.info("Poster saved to %s (%d bytes)", tmp_path, len(data))
 
-                    # Verify file has content
-                    file_size = os.path.getsize(tmp.name)
-                    log.info("Poster file size on disk: %d bytes", file_size)
-                    if file_size < 1000:
-                        log.warning("Poster file too small (%d bytes), deleting", file_size)
-                        os.unlink(tmp.name)
-                        return None
+                # Convert webp to jpg (Telegram rejects webp in send_photo)
+                if tmp_path.endswith(".webp"):
+                    jpg_path = tmp_path.rsplit(".", 1)[0] + ".jpg"
+                    try:
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", tmp_path, jpg_path],
+                            capture_output=True, timeout=10,
+                        )
+                        os.unlink(tmp_path)
+                        if os.path.exists(jpg_path) and os.path.getsize(jpg_path) > 1000:
+                            return jpg_path
+                    except Exception:
+                        log.warning("webp->jpg conversion failed")
+                        if os.path.exists(jpg_path):
+                            os.unlink(jpg_path)
+                    # If conversion fails, return None
+                    return None
 
-                    # Convert webp to jpg (Telegram rejects webp in send_photo)
-                    if tmp.name.endswith(".webp"):
-                        jpg_path = tmp.name.rsplit(".", 1)[0] + ".jpg"
-                        try:
-                            subprocess.run(
-                                ["ffmpeg", "-y", "-i", tmp.name, jpg_path],
-                                capture_output=True, timeout=10,
-                            )
-                            os.unlink(tmp.name)
-                            if os.path.exists(jpg_path) and os.path.getsize(jpg_path) > 1000:
-                                return jpg_path
-                        except Exception:
-                            log.warning("webp->jpg conversion failed")
-                            if os.path.exists(jpg_path):
-                                os.unlink(jpg_path)
-                        # If conversion fails, try sending webp anyway
-                        return None
-
-                    return tmp.name
-                except Exception:
-                    tmp.close()
-                    os.unlink(tmp.name)
-                    raise
+                return tmp_path
 
     except Exception as e:
         log.error("Failed to download poster from %s: %s", url, e, exc_info=True)
