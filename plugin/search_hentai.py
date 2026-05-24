@@ -31,7 +31,8 @@ async def hentaisearch(client: Client, message: Message):
     await clear_chat_history(client, message.chat.id)
     
     # Track user's search message for auto-delete (10 min)
-    await track_message(message.chat.id, message.id)
+    # sender_type="user" so clear_chat_history won't delete it immediately
+    await track_message(message.chat.id, message.id, sender_type="user")
 
     await log_search(client, message.from_user.username, query)
 

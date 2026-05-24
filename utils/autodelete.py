@@ -48,12 +48,16 @@ async def delete_user_message(chat_id: int, message_id: int):
         log.warning("Userbot failed to delete user message %s in chat %s: %s", message_id, chat_id, e)
 
 
-async def track_message(chat_id: int, message_id: int, extra_data: dict = None):
-    """Track a bot message for auto-deletion."""
+async def track_message(chat_id: int, message_id: int, extra_data: dict = None, sender_type: str = "bot"):
+    """Track a message for auto-deletion.
+    
+    sender_type: "bot" for bot messages, "user" for user messages.
+    """
     db = get_db()
     doc = {
         "chat_id": chat_id,
         "message_id": message_id,
+        "sender_type": sender_type,
         "created_at": datetime.now(timezone.utc),
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=DELETE_AFTER_MINUTES),
     }
@@ -62,8 +66,8 @@ async def track_message(chat_id: int, message_id: int, extra_data: dict = None):
     await db.auto_delete.insert_one(doc)
 
 
-async def track_messages(chat_id: int, message_ids: list[int], extra_data: dict = None):
-    """Track multiple bot messages for auto-deletion."""
+async def track_messages(chat_id: int, message_ids: list[int], extra_data: dict = None, sender_type: str = "bot"):
+    """Track multiple messages for auto-deletion."""
     if not message_ids:
         return
     db = get_db()
@@ -71,7 +75,7 @@ async def track_messages(chat_id: int, message_ids: list[int], extra_data: dict 
     expires = now + timedelta(minutes=DELETE_AFTER_MINUTES)
     docs = []
     for mid in message_ids:
-        doc = {"chat_id": chat_id, "message_id": mid, "created_at": now, "expires_at": expires}
+        doc = {"chat_id": chat_id, "message_id": mid, "sender_type": sender_type, "created_at": now, "expires_at": expires}
         if extra_data:
             doc.update(extra_data)
         docs.append(doc)
@@ -102,15 +106,24 @@ async def delete_all_user_messages(client: Client, chat_id: int):
     return deleted_count
 
 
-async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids: list = None):
+async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids: list = None, delete_user_messages: bool = False):
     """
-    Clear all tracked bot messages for a user.
-    If userbot is configured, also does a full revoke delete of the entire
-    private chat history (wipes both sides including user messages).
+    Clear tracked bot messages for a user.
+    
+    By default only deletes bot messages (sender_type="bot").
+    Set delete_user_messages=True to also delete user messages immediately.
+    
+    The auto-delete loop will still clean up user messages after 10 minutes.
     """
     preserve_set = set(preserve_message_ids or [])
     db = get_db()
-    cursor = db.auto_delete.find({"chat_id": chat_id})
+    
+    # Only delete bot messages by default (preserve user messages for 10-min auto-delete)
+    query = {"chat_id": chat_id, "sender_type": "bot"}
+    if delete_user_messages:
+        query = {"chat_id": chat_id}
+    
+    cursor = db.auto_delete.find(query)
     deleted_count = 0
     message_ids = []
 
@@ -139,14 +152,6 @@ async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids:
                 log.warning("Failed to clear tracked messages for chat %s: %s", chat_id, e)
 
         await db.auto_delete.delete_many({"chat_id": chat_id, "message_id": {"$in": message_ids}})
-
-    # If userbot is available, wipe the entire chat history (both sides)
-    if _userbot:
-        try:
-            await _userbot.delete_chat_history(chat_id)
-            log.info("Userbot: wiped full chat history for %s", chat_id)
-        except Exception as e:
-            log.warning("Userbot delete_chat_history failed for %s: %s", chat_id, e)
 
     return deleted_count
 

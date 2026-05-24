@@ -110,11 +110,9 @@ async def start_command(client: Client, message: Message):
     chat_id = message.chat.id
     user_message_id = message.id
 
-    # Clear old bot messages from this chat
-    await clear_chat_history(client, chat_id)
-    
-    # Track user's /start message for auto-delete (10 min)
-    await track_message(chat_id, user_message_id)
+    # Logic workflow: track user's /start message for auto-delete (10 min)
+    # sender_type="user" so clear_chat_history won't delete it immediately
+    await track_message(chat_id, user_message_id, sender_type="user")
 
     # Force-sub check FIRST
     passed, channel_id = await check_force_sub(client, user.id)
