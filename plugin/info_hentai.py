@@ -103,6 +103,7 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     if len(episodes) > 1:
         buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{slug}")])
     
+    buttons.append([InlineKeyboardButton("🇮🇳 Hindi Dub", callback_data=f"hindi_{slug}")])
     buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")])
 
     keyboard = InlineKeyboardMarkup(buttons)
