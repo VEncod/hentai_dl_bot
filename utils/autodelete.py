@@ -34,16 +34,18 @@ def set_userbot(client: Client):
 
 async def delete_user_message(chat_id: int, message_id: int):
     """
-    Try to delete a user-sent message.
+    Try to delete a user-sent message immediately.
     Uses userbot if available, otherwise tries the bot (fails silently in DMs).
     """
     client = _userbot
     if client is None:
+        log.debug("No userbot configured, skipping user message deletion")
         return
     try:
         await client.delete_messages(chat_id, message_id)
-    except Exception:
-        pass  # Message already gone or no permission
+        log.info("Userbot deleted user message %s in chat %s", message_id, chat_id)
+    except Exception as e:
+        log.warning("Userbot failed to delete user message %s in chat %s: %s", message_id, chat_id, e)
 
 
 async def track_message(chat_id: int, message_id: int, extra_data: dict = None):

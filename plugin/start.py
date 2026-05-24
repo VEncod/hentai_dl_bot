@@ -109,10 +109,15 @@ async def start_command(client: Client, message: Message):
     user = message.from_user
     db = get_db()
     chat_id = message.chat.id
+    user_message_id = message.id
 
-    # Clear old messages + wipe chat history (userbot handles user messages)
+    # Clear old bot messages from this chat
     await clear_chat_history(client, chat_id)
-    await delete_user_message(chat_id, message.id)
+    
+    # Try to delete the user's /start command message
+    # Note: This only works if userbot is in the same chat.
+    # In private bot chats, Telegram API prevents deleting user messages.
+    await delete_user_message(chat_id, user_message_id)
 
     # Force-sub check FIRST
     passed, channel_id = await check_force_sub(client, user.id)
