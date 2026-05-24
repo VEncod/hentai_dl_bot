@@ -15,7 +15,7 @@ hanime_api = HanimeAPI()
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.poster import download_poster
-from utils.autodelete import track_message
+from utils.autodelete import track_message, clear_chat_history
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +53,11 @@ async def _send_with_poster(client, chat_id, poster_url, text, keyboard):
 async def infohentai(client: Client, callback_query: CallbackQuery):
     """Show details for a selected hentai (info_<slug> callback)."""
     slug = callback_query.data.split("_", 1)[1]
+    chat_id = callback_query.from_user.id
     log.info("=== INFO HANDLER CALLED for slug=%s ===", slug)
+
+    # Clear old messages before showing new info
+    await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
 
     try:
         await callback_query.answer("Loading details...")

@@ -2,6 +2,7 @@
 Auto-delete — tracks bot messages in user DMs and deletes them after a set time.
 
 Messages are stored in MongoDB and a background task cleans them up periodically.
+Also supports immediate cleanup of all messages for a user.
 """
 
 import asyncio
@@ -20,29 +21,85 @@ DELETE_AFTER_HOURS = 4
 CHECK_INTERVAL_SECONDS = 300
 
 
-async def track_message(chat_id: int, message_id: int):
+async def track_message(chat_id: int, message_id: int, extra_data: dict = None):
     """Track a bot message for auto-deletion."""
     db = get_db()
-    await db.auto_delete.insert_one({
+    doc = {
         "chat_id": chat_id,
         "message_id": message_id,
         "created_at": datetime.now(timezone.utc),
         "expires_at": datetime.now(timezone.utc) + timedelta(hours=DELETE_AFTER_HOURS),
-    })
+    }
+    if extra_data:
+        doc.update(extra_data)
+    await db.auto_delete.insert_one(doc)
 
 
-async def track_messages(chat_id: int, message_ids: list[int]):
+async def track_messages(chat_id: int, message_ids: list[int], extra_data: dict = None):
     """Track multiple bot messages for auto-deletion."""
     if not message_ids:
         return
     db = get_db()
     now = datetime.now(timezone.utc)
     expires = now + timedelta(hours=DELETE_AFTER_HOURS)
-    docs = [
-        {"chat_id": chat_id, "message_id": mid, "created_at": now, "expires_at": expires}
-        for mid in message_ids
-    ]
+    docs = []
+    for mid in message_ids:
+        doc = {"chat_id": chat_id, "message_id": mid, "created_at": now, "expires_at": expires}
+        if extra_data:
+            doc.update(extra_data)
+        docs.append(doc)
     await db.auto_delete.insert_many(docs)
+
+
+async def delete_all_user_messages(client: Client, chat_id: int):
+    """Delete all tracked messages for a user immediately."""
+    db = get_db()
+    cursor = db.auto_delete.find({"chat_id": chat_id})
+    deleted_count = 0
+    message_ids = []
+    
+    async for doc in cursor:
+        message_ids.append(doc["message_id"])
+    
+    if message_ids:
+        try:
+            await client.delete_messages(chat_id, message_ids)
+            deleted_count = len(message_ids)
+            log.info("Auto-delete: immediately deleted %d messages for chat %s", deleted_count, chat_id)
+        except Exception as e:
+            log.warning("Failed to bulk delete messages for chat %s: %s", chat_id, e)
+        
+        # Remove from DB regardless of success
+        await db.auto_delete.delete_many({"chat_id": chat_id, "message_id": {"$in": message_ids}})
+    
+    return deleted_count
+
+
+async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids: list = None):
+    """Clear all tracked messages for a user. Call this when starting a new flow."""
+    preserve_set = set(preserve_message_ids or [])
+    db = get_db()
+    cursor = db.auto_delete.find({"chat_id": chat_id})
+    deleted_count = 0
+    message_ids = []
+    
+    async for doc in cursor:
+        mid = doc["message_id"]
+        if mid not in preserve_set:
+            message_ids.append(mid)
+    
+    if message_ids:
+        try:
+            await client.delete_messages(chat_id, message_ids)
+            deleted_count = len(message_ids)
+            log.info("Auto-delete: cleared %d old messages for chat %s", deleted_count, chat_id)
+        except Exception as e:
+            log.warning("Failed to clear messages for chat %s: %s", chat_id, e)
+        
+        # Remove from DB
+        await db.auto_delete.delete_many({"chat_id": chat_id, "message_id": {"$in": message_ids}})
+    
+    return deleted_count
 
 
 async def _cleanup_expired(client: Client):

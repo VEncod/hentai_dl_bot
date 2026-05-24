@@ -22,7 +22,7 @@ from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.db import get_db
 from utils.catalog import update_catalog
-from utils.autodelete import track_message
+from utils.autodelete import track_message, clear_chat_history
 from utils.logger import (
     log_download_start, log_download_progress, log_upload_complete,
     log_error, get_main_channel,
@@ -515,6 +515,46 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     start_time = time.time()
 
+    # Clear old messages before starting download
+    await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
+
+    # ── CHECK CACHE FIRST ─────────────────────────────────────────
+    cached = await db.Name.find_one({"name": slug})
+    if cached and cached.get("file_size", 0) > 50_000:
+        file_id = cached.get("file_id")
+        if file_id:
+            log.info("Cache hit for %s — sending existing file", slug)
+            try:
+                info = hanime_api.details(slug)
+                tags_str = ", ".join(info.get("tags", [])[:5])
+                caption = (
+                    f"{info['name']}\n"
+                    f"Tags: {tags_str}\n"
+                    f"📦 Already downloaded!\n"
+                    f"Downloaded via @hanime_dl_bot"
+                )
+            except Exception:
+                caption = f"{slug}\n📦 Already downloaded!\nDownloaded via @hanime_dl_bot"
+            
+            try:
+                sent = await client.send_document(
+                    chat_id=chat_id,
+                    document=file_id,
+                    caption=caption,
+                )
+                await track_message(chat_id, sent.id)
+                await _safe_edit(
+                    callback_query,
+                    f"✅ **Already Downloaded!**\n\n"
+                    f"📄 {slug}\n"
+                    f"💾 File sent from cache.\n\n"
+                    f"Auto-deletes in 4 hours. Save it!"
+                )
+                return
+            except Exception:
+                log.warning("Cache send failed for %s, will re-download", slug)
+                await db.Name.delete_one({"name": slug})
+
     await _safe_edit(callback_query, f"🚀 **Preparing Download**\n\n{_progress_bar(0)}\n\n⏳ Please wait...")
 
     log_msg_id = await log_download_start(client, username, slug)
@@ -703,6 +743,9 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
     if not await is_approved(chat_id):
         await callback_query.answer("No access.", show_alert=True)
         return
+
+    # Clear old messages before starting batch
+    await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
 
     try:
         await callback_query.answer("Starting batch download...")

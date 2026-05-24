@@ -13,7 +13,7 @@ hanime_api = HanimeAPI()
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.logger import log_search
-from utils.autodelete import track_message
+from utils.autodelete import track_message, clear_chat_history
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,9 @@ async def hentaisearch(client: Client, message: Message):
 
     if not query:
         return
+
+    # Clear old messages before new search
+    await clear_chat_history(client, message.chat.id, preserve_message_ids=[message.id])
 
     await log_search(client, message.from_user.username, query)
 

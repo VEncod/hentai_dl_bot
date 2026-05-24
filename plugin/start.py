@@ -20,7 +20,7 @@ from pyrogram.types import (
 
 from utils.db import get_db
 from utils.fsub import check_force_sub, send_force_sub_message
-from utils.autodelete import track_message
+from utils.autodelete import track_message, clear_chat_history
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +108,10 @@ async def checksub_callback(client, callback_query):
 async def start_command(client: Client, message: Message):
     user = message.from_user
     db = get_db()
+    chat_id = message.chat.id
+
+    # Clear old messages first
+    await clear_chat_history(client, chat_id, preserve_message_ids=[message.id])
 
     # Force-sub check FIRST
     passed, channel_id = await check_force_sub(client, user.id)
