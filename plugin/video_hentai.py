@@ -22,6 +22,7 @@ from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.db import get_db
 from utils.catalog import update_catalog
+from utils.poster import download_thumbnail
 from utils.autodelete import track_message, clear_chat_history
 from utils.logger import (
     log_download_start, log_download_progress, log_upload_complete,
@@ -524,6 +525,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         file_id = cached.get("file_id")
         if file_id:
             log.info("Cache hit for %s — sending existing file", slug)
+            thumb_path = None
             try:
                 info = hanime_api.details(slug)
                 tags_str = ", ".join(info.get("tags", [])[:5])
@@ -533,6 +535,9 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                     f"📦 Already downloaded!\n"
                     f"Downloaded via @hanime_dl_bot"
                 )
+                thumb_url = info.get("cover_url") or info.get("poster_url") or ""
+                if thumb_url:
+                    thumb_path = await download_thumbnail(thumb_url)
             except Exception:
                 caption = f"{slug}\n📦 Already downloaded!\nDownloaded via @hanime_dl_bot"
             
@@ -541,6 +546,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                     chat_id=chat_id,
                     document=file_id,
                     caption=caption,
+                    thumb=thumb_path,
                 )
                 await track_message(chat_id, sent.id)
                 await _safe_edit(
@@ -554,6 +560,12 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             except Exception:
                 log.warning("Cache send failed for %s, will re-download", slug)
                 await db.Name.delete_one({"name": slug})
+            finally:
+                if thumb_path and os.path.exists(thumb_path):
+                    try:
+                        os.unlink(thumb_path)
+                    except OSError:
+                        pass
 
     await _safe_edit(callback_query, f"🚀 **Preparing Download**\n\n{_progress_bar(0)}\n\n⏳ Please wait...")
 
@@ -657,8 +669,9 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         if log_msg_id:
             await log_download_progress(client, log_msg_id, username, slug, 90)
 
-        # Get video details
+        # Get video details + episode thumbnail
         info = None
+        thumb_path = None
         try:
             info = hanime_api.details(slug)
             series_name = _extract_series_name(slug)
@@ -668,17 +681,29 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 f"Tags: {tags_str}\n"
                 f"Downloaded via @hanime_dl_bot"
             )
+            # Episode thumbnail (cover_url = wide episode art, distinct from series poster)
+            thumb_url = info.get("cover_url") or info.get("poster_url") or ""
+            if thumb_url:
+                thumb_path = await download_thumbnail(thumb_url)
         except Exception:
             series_name = _extract_series_name(slug)
             caption = f"{slug}\nDownloaded via @hanime_dl_bot"
         
-        # Send to user with progress callback
-        sent = await client.send_document(
-            chat_id=chat_id,
-            document=filename,
-            caption=caption,
-            progress=upload_progress,
-        )
+        # Send to user with progress callback + thumbnail
+        try:
+            sent = await client.send_document(
+                chat_id=chat_id,
+                document=filename,
+                caption=caption,
+                thumb=thumb_path,
+                progress=upload_progress,
+            )
+        finally:
+            if thumb_path and os.path.exists(thumb_path):
+                try:
+                    os.unlink(thumb_path)
+                except OSError:
+                    pass
         await track_message(chat_id, sent.id)
 
         file_id = sent.document.file_id
@@ -797,16 +822,31 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         # Check cache
         cached = await db.Name.find_one({"name": ep_slug})
         if cached and cached.get("file_size", 0) > 50_000:
+            ep_thumb = None
+            try:
+                ep_info_c = hanime_api.details(ep_slug)
+                thumb_url = ep_info_c.get("cover_url") or ep_info_c.get("poster_url") or ""
+                if thumb_url:
+                    ep_thumb = await download_thumbnail(thumb_url)
+            except Exception:
+                pass
             try:
                 await client.send_document(
                     chat_id=chat_id,
                     document=cached["file_id"],
                     caption=f"{ep_name}\nDownloaded via @hanime_dl_bot",
+                    thumb=ep_thumb,
                 )
                 succeeded += 1
                 continue
             except Exception:
                 await db.Name.delete_one({"name": ep_slug})
+            finally:
+                if ep_thumb and os.path.exists(ep_thumb):
+                    try:
+                        os.unlink(ep_thumb)
+                    except OSError:
+                        pass
 
         # Fresh download with progress
         try:
@@ -858,10 +898,15 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             failed += 1
             continue
 
+        ep_info = None
+        ep_thumb = None
         try:
             ep_info = hanime_api.details(ep_slug)
             tags_str = ", ".join(ep_info.get("tags", [])[:5])
             caption = f"{ep_name}\nTags: {tags_str}\nDownloaded via @hanime_dl_bot"
+            thumb_url = ep_info.get("cover_url") or ep_info.get("poster_url") or ""
+            if thumb_url:
+                ep_thumb = await download_thumbnail(thumb_url)
         except Exception:
             caption = f"{ep_name}\nDownloaded via @hanime_dl_bot"
 
@@ -870,7 +915,14 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 chat_id=chat_id,
                 document=filename,
                 caption=caption,
+                thumb=ep_thumb,
             )
+        finally:
+            if ep_thumb and os.path.exists(ep_thumb):
+                try:
+                    os.unlink(ep_thumb)
+                except OSError:
+                    pass
             file_id = sent.document.file_id
             await db.Name.update_one(
                 {"name": ep_slug},

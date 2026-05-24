@@ -12,7 +12,6 @@ MongoDB collection: MangaDb.catalog
 import asyncio
 import logging
 import os
-import re
 from datetime import datetime, timezone
 
 from pyrogram import Client
@@ -25,15 +24,13 @@ from utils.poster import download_poster
 log = logging.getLogger(__name__)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _extract_series_slug(episode_slug: str) -> str:
     """
-    Extract the series slug from an episode slug by stripping the trailing
-    episode number.
-
-    Examples:
-        "ane-yome-quartet-1"  -> "ane-yome-quartet"
-        "ane-yome-quartet-2"  -> "ane-yome-quartet"
-        "some-title"          -> "some-title"
+    Strip trailing episode number from a slug.
+    "ane-yome-quartet-2" -> "ane-yome-quartet"
+    "some-title"         -> "some-title"
     """
     parts = episode_slug.rsplit("-", 1)
     if len(parts) == 2 and parts[1].isdigit():
@@ -42,12 +39,10 @@ def _extract_series_slug(episode_slug: str) -> str:
 
 
 def _slug_to_display_name(slug: str) -> str:
-    """Convert a slug to a human-readable title-case name."""
     return slug.replace("-", " ").title()
 
 
 def _build_caption(series_name: str, tags: list[str], episode_count: int) -> str:
-    """Build the caption text for the catalog channel message."""
     tags_str = ", ".join(tags[:6]) if tags else "—"
     return (
         f"📺 **{series_name}**\n"
@@ -57,16 +52,41 @@ def _build_caption(series_name: str, tags: list[str], episode_count: int) -> str
 
 
 def _build_keyboard(series_slug: str) -> InlineKeyboardMarkup:
-    """Build the inline keyboard with a 'Get Episodes' button."""
-    # Callback data limit is 64 bytes. "cat_" = 4 bytes, so slug can be up to 60.
     cb_data = f"cat_{series_slug}"
     if len(cb_data.encode("utf-8")) > 64:
-        # Truncate slug to fit
         cb_data = cb_data[:64]
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📁 Get Episodes", callback_data=cb_data)]
     ])
 
+
+async def _resolve_poster_url(slug: str, provided_url: str) -> str:
+    """
+    Return the best available poster URL.
+    Falls back to API fetch if nothing was provided.
+    """
+    if provided_url:
+        return provided_url
+
+    try:
+        from api.hanime_api import HanimeAPI
+        api = HanimeAPI()
+        info = api.details(slug)
+        url = (
+            info.get("poster_url")
+            or info.get("cover_url")
+            or info.get("cover")
+            or ""
+        )
+        if url:
+            log.info("Resolved poster URL from API for %s: %s", slug, url[:80])
+        return url
+    except Exception as e:
+        log.warning("Could not resolve poster URL for %s: %s", slug, e)
+        return ""
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
 
 async def update_catalog(
     client: Client,
@@ -77,22 +97,6 @@ async def update_catalog(
     poster_url: str,
     tags: list[str],
 ) -> dict | None:
-    log.info("update_catalog called for %s with poster_url=%s", slug, poster_url[:80] if poster_url else "NONE")
-    
-    # If no poster_url provided, try to fetch from API
-    if not poster_url:
-        try:
-            from api.hanime_api import HanimeAPI
-            api = HanimeAPI()
-            info = api.details(slug)
-            if info:
-                poster_url = (info.get('poster_url') or 
-                             info.get('cover_url') or 
-                             info.get('poster') or 
-                             '')
-                log.info("Fetched poster from API for %s: %s", slug, poster_url[:80] if poster_url else "NONE")
-        except Exception as e:
-            log.warning("Failed to fetch poster from API for %s: %s", slug, e)
     """
     Update the series catalog after a successful episode download.
 
@@ -104,56 +108,60 @@ async def update_catalog(
     """
     db = get_db()
     series_slug = _extract_series_slug(slug)
-
-    # Use provided series_name or derive from slug
     display_name = series_name or _slug_to_display_name(series_slug)
 
-    # Episode entry
+    # Resolve poster URL if not provided
+    poster_url = await _resolve_poster_url(slug, poster_url)
+    log.info("update_catalog: series=%s poster=%s", series_slug, poster_url[:80] if poster_url else "NONE")
+
+    # Upsert episode into catalog doc
     episode_data = {
-        "file_id": file_id,
-        "name": _slug_to_display_name(slug),
+        "file_id":   file_id,
+        "name":      _slug_to_display_name(slug),
         "file_size": file_size,
     }
 
-    # Upsert the episode into the catalog doc
+    update_fields: dict = {
+        f"episodes.{slug}": episode_data,
+        "series_name":      display_name,
+        "tags":             tags,
+        "updated_at":       datetime.now(timezone.utc),
+    }
+    # Only overwrite stored poster_url if we have a non-empty one
+    if poster_url:
+        update_fields["poster_url"] = poster_url
+
     await db.catalog.update_one(
         {"series": series_slug},
         {
-            "$set": {
-                f"episodes.{slug}": episode_data,
-                "series_name": display_name,
-                "poster_url": poster_url,
-                "tags": tags,
-                "updated_at": datetime.now(timezone.utc),
-            },
-            "$setOnInsert": {
-                "series": series_slug,
-            },
+            "$set": update_fields,
+            "$setOnInsert": {"series": series_slug},
         },
         upsert=True,
     )
 
-    # Reload the doc to get current state
     catalog_doc = await db.catalog.find_one({"series": series_slug})
     if not catalog_doc:
         log.error("Catalog doc missing after upsert for series=%s", series_slug)
         return None
 
-    episodes = catalog_doc.get("episodes", {})
-    episode_count = len(episodes)
+    # Use stored poster_url if current call didn't provide one
+    if not poster_url:
+        poster_url = catalog_doc.get("poster_url", "")
 
-    caption = _build_caption(display_name, tags, episode_count)
-    keyboard = _build_keyboard(series_slug)
+    episode_count    = len(catalog_doc.get("episodes", {}))
+    caption          = _build_caption(display_name, tags, episode_count)
+    keyboard         = _build_keyboard(series_slug)
 
     main_channel = await get_main_channel()
     if not main_channel:
-        log.warning("No main channel set — skipping catalog channel message for %s", series_slug)
+        log.warning("No main channel set — skipping catalog update for %s", series_slug)
         return catalog_doc
 
     channel_message_id = catalog_doc.get("channel_message_id")
 
+    # ── Try to update existing message ───────────────────────────────────────
     if channel_message_id:
-        # ── Update existing message ─────────────────────────────────
         try:
             await client.edit_message_caption(
                 chat_id=main_channel,
@@ -161,84 +169,78 @@ async def update_catalog(
                 caption=caption,
                 reply_markup=keyboard,
             )
-            log.info("Updated catalog message %d for series=%s (episodes=%d)",
+            log.info("Updated catalog message %d for series=%s (ep=%d)",
                      channel_message_id, series_slug, episode_count)
-        except Exception:
-            log.exception("Failed to edit catalog message %d for %s — sending new one",
-                          channel_message_id, series_slug)
-            # Message might have been deleted; fall through to create new
+            return catalog_doc
+        except Exception as e:
+            log.warning(
+                "Could not edit catalog message %d for %s (%s) — will create new one",
+                channel_message_id, series_slug, e,
+            )
+            # Clear stale message ID so we create a fresh one
             channel_message_id = None
-
-    if not channel_message_id:
-        # ── Create new catalog message ──────────────────────────────
-        poster_path = None
-        try:
-            # Try to download poster with fallback
-            log.info("Attempting to download poster for %s from: %s", series_slug, poster_url[:80] if poster_url else "NONE")
-            poster_path = await download_poster(poster_url)
-            
-            if not poster_path and poster_url:
-                log.warning("Failed to download poster for %s from %s", series_slug, poster_url[:80])
-
-            if poster_path:
-                log.info("Poster downloaded successfully: %s (%d bytes)", poster_path, os.path.getsize(poster_path))
-                try:
-                    msg = await client.send_photo(
-                        chat_id=main_channel,
-                        photo=poster_path,
-                        caption=caption,
-                        reply_markup=keyboard,
-                    )
-                    log.info("Sent catalog message with poster for %s", series_slug)
-                except Exception as e:
-                    log.error("Failed to send_photo for %s: %s", series_slug, e)
-                    # Fallback to text message
-                    msg = await client.send_message(
-                        chat_id=main_channel,
-                        text=caption,
-                        reply_markup=keyboard,
-                    )
-                    log.info("Sent catalog text message as fallback for %s", series_slug)
-            else:
-                # No poster available — send text-only message
-                log.info("No poster available, sending text-only catalog for %s", series_slug)
-                msg = await client.send_message(
-                    chat_id=main_channel,
-                    text=caption,
-                    reply_markup=keyboard,
-                )
-                log.info("Sent catalog message without poster for %s", series_slug)
-
-            channel_message_id = msg.id
-            log.info("Created catalog message %d for series=%s", channel_message_id, series_slug)
-
-            # Save the message ID back to the catalog doc
             await db.catalog.update_one(
                 {"series": series_slug},
-                {"$set": {
-                    "channel_message_id": channel_message_id,
-                    "channel_id": main_channel,
-                }},
+                {"$unset": {"channel_message_id": "", "channel_id": ""}},
             )
 
-        except Exception:
-            log.exception("Failed to create catalog message for series=%s", series_slug)
-        finally:
-            if poster_path and os.path.exists(poster_path):
-                try:
-                    os.unlink(poster_path)
-                except OSError:
-                    pass
+    # ── Create new catalog message ────────────────────────────────────────────
+    poster_path = None
+    try:
+        if poster_url:
+            poster_path = await download_poster(poster_url, for_thumbnail=False)
+
+        msg = None
+
+        if poster_path:
+            try:
+                msg = await client.send_photo(
+                    chat_id=main_channel,
+                    photo=poster_path,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+                log.info("Created catalog poster message for %s", series_slug)
+            except Exception as e:
+                log.warning("send_photo failed for %s: %s — trying text fallback", series_slug, e)
+
+        if not msg:
+            # Text-only fallback (no poster or photo send failed)
+            msg = await client.send_message(
+                chat_id=main_channel,
+                text=caption,
+                reply_markup=keyboard,
+            )
+            log.info("Created catalog text message for %s (no poster)", series_slug)
+
+        # Persist the new message ID
+        await db.catalog.update_one(
+            {"series": series_slug},
+            {"$set": {
+                "channel_message_id": msg.id,
+                "channel_id":         main_channel,
+            }},
+        )
+        log.info("Saved catalog message_id=%d for series=%s", msg.id, series_slug)
+
+    except Exception:
+        log.exception("Failed to create catalog message for series=%s", series_slug)
+    finally:
+        if poster_path and os.path.exists(poster_path):
+            try:
+                os.unlink(poster_path)
+            except OSError:
+                pass
 
     return catalog_doc
 
 
+# ── Episode retrieval ─────────────────────────────────────────────────────────
+
 async def get_catalog_episodes(series_slug: str) -> dict:
     """
     Retrieve all episodes for a series from the catalog.
-
-    Returns a dict of {episode_slug: {"file_id": ..., "name": ..., "file_size": ...}}
-    or an empty dict if nothing found.
+    Returns {episode_slug: {file_id, name, file_size}} or {}.
     """
     db = get_db()
     doc = await db.catalog.find_one({"series": series_slug})
