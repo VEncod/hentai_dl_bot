@@ -505,23 +505,63 @@ async def _resolve_tg_link(ub: Client, tg: dict, progress_cb=None) -> dict | Non
 
 def get_message_links(msg: Message) -> list[str]:
     """
-    Extract all resolvable links from a message.
-    Checks: text, caption, and inline button URLs.
+    Extract download links from a message, filtering out non-download links
+    like "how to download" guides, backup channels, etc.
+
+    Returns links sorted by priority: download links first.
     """
-    urls = []
-
-    # From text/caption
     text = (msg.text or "") + " " + (msg.caption or "")
-    urls.extend(extract_urls(text))
+    lines = text.split("\n")
 
-    # From inline buttons
+    download_urls = []
+    other_urls = []
+
+    # Keywords that indicate a line is NOT a download link
+    skip_keywords = [
+        "how to download", "how to", "tutorial", "guide",
+        "backup", "back up", "backup channel", "join",
+        "our channel", "main channel", "update channel",
+        "support", "request", "contact",
+    ]
+
+    # Keywords that indicate a line IS a download link
+    download_keywords = [
+        "download", "⬇️", "⬇", "📥", "link", "get file",
+        "click here", "tap here", "👇", "⤵️",
+    ]
+
+    for line in lines:
+        line_lower = line.lower().strip()
+        urls_in_line = extract_urls(line)
+        if not urls_in_line:
+            continue
+
+        # Check if this line should be skipped
+        is_skip = any(kw in line_lower for kw in skip_keywords)
+        is_download = any(kw in line_lower for kw in download_keywords)
+
+        for url in urls_in_line:
+            if is_skip and not is_download:
+                other_urls.append(url)
+            else:
+                download_urls.append(url)
+
+    # Also check inline buttons — buttons labeled "Download" are high priority
     if msg.reply_markup:
         for row in msg.reply_markup.inline_keyboard:
             for btn in row:
-                if btn.url:
-                    urls.append(btn.url)
+                if not btn.url:
+                    continue
+                btn_text = (btn.text or "").lower()
+                is_skip = any(kw in btn_text for kw in skip_keywords)
+                is_dl = any(kw in btn_text for kw in download_keywords)
+                if is_skip and not is_dl:
+                    other_urls.append(btn.url)
+                else:
+                    download_urls.append(btn.url)
 
-    return urls
+    # Return download links first, then others as fallback
+    return download_urls + other_urls
 
 
 def needs_link_resolution(msg: Message) -> bool:
