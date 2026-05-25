@@ -25,7 +25,7 @@ from plugin.channels import (
 from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
-from plugin.hindi_dub import hindi_dub_handler, addhindi_command, removehindi_command, hindichannels_command
+from plugin.hindi_dub import hindi_dub_handler, addhindi_command, removehindi_command, hindichannels_command, clearhindi_command
 from utils.autodelete import start_autodelete_loop, set_userbot
 from utils.hindi_dub import set_userbot as set_hindi_userbot
 from utils.session_store import load_session_string, save_session_string
@@ -137,6 +137,7 @@ async def main():
     bot.add_handler(MessageHandler(addhindi_command, filters.command("addhindi")))
     bot.add_handler(MessageHandler(removehindi_command, filters.command("removehindi")))
     bot.add_handler(MessageHandler(hindichannels_command, filters.command("hindichannels")))
+    bot.add_handler(MessageHandler(clearhindi_command, filters.command("clearhindi")))
 
     # Search — LAST message handler (catches any non-command text)
     bot.add_handler(MessageHandler(hentaisearch, filters.text & ~filters.regex(r"^/") & filters.private))

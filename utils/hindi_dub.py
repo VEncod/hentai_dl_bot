@@ -213,6 +213,16 @@ async def _check_cache(slug: str) -> dict | None:
     return await db.hindi_cache.find_one({"slug": slug})
 
 
+async def clear_hindi_cache(slug: str = None):
+    """Clear Hindi dub cache. If slug given, clear just that entry. Otherwise clear all."""
+    db = get_hindi_db()
+    if slug:
+        await db.hindi_cache.delete_one({"slug": slug})
+    else:
+        await db.hindi_cache.delete_many({})
+    return True
+
+
 async def _save_to_cache(slug: str, file_id: str, file_name: str,
                           channel_id: int, channel_title: str,
                           message_id: int, file_size: int = 0):

@@ -31,6 +31,7 @@ from utils.hindi_dub import (
     remove_hindi_channel,
     list_hindi_channels,
     get_userbot,
+    clear_hindi_cache,
 )
 
 log = logging.getLogger(__name__)
@@ -264,3 +265,20 @@ async def hindichannels_command(client: Client, message: Message):
 
     text += f"\nTotal: {len(channels)} channels"
     await message.reply_text(text)
+
+
+async def clearhindi_command(client: Client, message: Message):
+    """Clear Hindi dub cache. Usage: /clearhindi [slug]"""
+    from utils.auth import is_admin
+
+    if not await is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1:
+        slug = parts[1].strip()
+        await clear_hindi_cache(slug)
+        await message.reply_text(f"✅ Cleared Hindi cache for `{slug}`")
+    else:
+        await clear_hindi_cache()
+        await message.reply_text("✅ Cleared entire Hindi dub cache")
