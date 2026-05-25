@@ -25,7 +25,7 @@ from pyrogram.enums import MessagesFilter
 from utils.db import get_hindi_db
 from utils.link_resolver import (
     needs_link_resolution, get_message_links, resolve_all_links,
-    is_shortened_url, is_telegram_link,
+    is_shortened_url, is_telegram_link, set_search_context,
 )
 
 log = logging.getLogger(__name__)
@@ -276,6 +276,9 @@ async def search_hindi_dub(
 
     queries = _build_search_queries(slug, name)
     log.info("Hindi dub search for %s — queries: %s", slug, queries[:5])
+
+    # Set search context so invite link resolver knows what to look for
+    set_search_context(slug)
 
     # Step 1: Search pre-configured channels
     channels = await list_hindi_channels()

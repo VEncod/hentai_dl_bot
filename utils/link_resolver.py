@@ -74,6 +74,9 @@ TG_BOT_START = re.compile(
 TG_BOT_LINK = re.compile(
     r'(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)',
 )
+TG_INVITE_LINK = re.compile(
+    r'(?:https?://)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)([a-zA-Z0-9_-]+)',
+)
 
 
 def extract_urls(text: str) -> list[str]:
@@ -106,15 +109,21 @@ def classify_telegram_link(url: str) -> dict | None:
     Returns:
       {"type": "channel_message", "channel": "...", "message_id": 123}
       {"type": "bot_start", "bot": "...", "param": "..."}
+      {"type": "invite", "hash": "..."}
       {"type": "bot", "bot": "..."}
       None if not a Telegram link
     """
+    # Invite link: t.me/+xxxxx or t.me/joinchat/xxxxx
+    # Must check BEFORE channel_message since +xxx could match other patterns
+    m = TG_INVITE_LINK.search(url)
+    if m:
+        return {"type": "invite", "hash": m.group(1)}
+
     # Channel message: t.me/channel/123
     m = TG_CHANNEL_MSG.search(url)
     if m:
         name = m.group(1)
         msg_id = int(m.group(2))
-        # Exclude known bots (they won't have /123 style messages usually)
         return {"type": "channel_message", "channel": name, "message_id": msg_id}
 
     # Bot with start param: t.me/bot?start=xxx
@@ -122,11 +131,10 @@ def classify_telegram_link(url: str) -> dict | None:
     if m:
         return {"type": "bot_start", "bot": m.group(1), "param": m.group(2)}
 
-    # Plain bot link: t.me/bot
+    # Plain bot/channel link: t.me/name
     m = TG_BOT_LINK.search(url)
     if m:
         name = m.group(1)
-        # Could be a channel or bot — we'll try both
         return {"type": "bot", "bot": name}
 
     return None
@@ -524,11 +532,118 @@ async def resolve_all_links(ub: Client, urls: list[str], progress_cb=None) -> di
     return None
 
 
+async def resolve_invite_link(ub: Client, invite_hash: str, search_slug: str = "") -> dict | None:
+    """
+    Join a channel via invite link, then search inside for a video file.
+    Returns {file_id, file_name, file_size, source} or None.
+    """
+    invite_url = f"https://t.me/+{invite_hash}"
+    log.info("Resolving invite link: %s", invite_url)
+
+    try:
+        # Join the channel
+        chat = await ub.join_chat(invite_url)
+        chat_id = chat.id
+        chat_title = chat.title or str(chat_id)
+        log.info("Joined channel via invite: %s (%s)", chat_title, chat_id)
+
+        # Wait a moment for the channel to load
+        await asyncio.sleep(1)
+
+        # Strategy 1: Check recent messages for video files
+        async for msg in ub.get_chat_history(chat_id, limit=50):
+            if msg.video:
+                # If we have a slug, do a basic relevance check
+                if search_slug:
+                    text = (msg.caption or "").lower() + " " + (msg.text or "").lower()
+                    slug_words = search_slug.replace("-", " ").lower().split()
+                    key_words = [w for w in slug_words if len(w) > 2]
+                    matches = sum(1 for w in key_words if w in text)
+                    if matches < min(2, len(key_words)):
+                        continue
+
+                return {
+                    "file_id": msg.video.file_id,
+                    "file_name": msg.video.file_name or f"video_{msg.id}.mp4",
+                    "file_size": msg.video.file_size or 0,
+                    "source": f"{chat_title} (invite)",
+                }
+
+            if msg.document:
+                mime = msg.document.mime_type or ""
+                fname = msg.document.file_name or ""
+                if "video" in mime or any(fname.lower().endswith(e) for e in ['.mp4', '.mkv', '.avi']):
+                    return {
+                        "file_id": msg.document.file_id,
+                        "file_name": msg.document.file_name or f"doc_{msg.id}",
+                        "file_size": msg.document.file_size or 0,
+                        "source": f"{chat_title} (invite)",
+                    }
+
+        # Strategy 2: Search inside the channel if we have a slug
+        if search_slug:
+            from pyrogram.enums import MessagesFilter
+            queries = search_slug.replace("-", " ").split()
+            short_query = " ".join(queries[:3])
+            for filt in [MessagesFilter.VIDEO, MessagesFilter.DOCUMENT]:
+                try:
+                    async for msg in ub.search_messages(
+                        chat_id=chat_id, query=short_query, limit=20, filter=filt
+                    ):
+                        file_id, file_name, file_size = "", "", 0
+                        if msg.video:
+                            file_id = msg.video.file_id
+                            file_name = msg.video.file_name or f"video_{msg.id}.mp4"
+                            file_size = msg.video.file_size or 0
+                        elif msg.document:
+                            mime = msg.document.mime_type or ""
+                            if "video" in mime:
+                                file_id = msg.document.file_id
+                                file_name = msg.document.file_name or f"doc_{msg.id}"
+                                file_size = msg.document.file_size or 0
+                        if file_id:
+                            return {
+                                "file_id": file_id,
+                                "file_name": file_name,
+                                "file_size": file_size,
+                                "source": f"{chat_title} (invite)",
+                            }
+                except Exception as e:
+                    log.debug("Search in invite channel failed: %s", e)
+
+        log.info("No video found in invite channel %s", chat_title)
+        return None
+
+    except Exception as e:
+        err = str(e).lower()
+        if "already" in err or "participant" in err:
+            # Already a member — try to get chat info and search
+            log.info("Already in channel from invite %s, searching...", invite_hash)
+            # Can't easily get chat_id from invite hash if already joined
+            pass
+        log.warning("Failed to resolve invite link %s: %s", invite_url, e)
+        return None
+
+
+# Store search_slug globally for invite resolution
+_current_search_slug = ""
+
+
+def set_search_context(slug: str):
+    global _current_search_slug
+    _current_search_slug = slug
+
+
 async def _resolve_tg_link(ub: Client, tg: dict, progress_cb=None) -> dict | None:
     """Resolve a classified Telegram link to a video file."""
     link_type = tg["type"]
 
-    if link_type == "channel_message":
+    if link_type == "invite":
+        if progress_cb:
+            await progress_cb("📡 Joining channel via invite link...")
+        return await resolve_invite_link(ub, tg["hash"], _current_search_slug)
+
+    elif link_type == "channel_message":
         if progress_cb:
             await progress_cb(f"📡 Fetching from @{tg['channel']}...")
         return await resolve_channel_message(ub, tg["channel"], tg["message_id"])
@@ -539,7 +654,6 @@ async def _resolve_tg_link(ub: Client, tg: dict, progress_cb=None) -> dict | Non
         return await resolve_bot_start(ub, tg["bot"], tg["param"])
 
     elif link_type == "bot":
-        # Plain bot link without start param — try with empty start
         if progress_cb:
             await progress_cb(f"🤖 Starting @{tg['bot']}...")
         return await resolve_bot_start(ub, tg["bot"], "")
