@@ -40,14 +40,39 @@ async def _wipe_chat_history(chat_id: int):
 
     try:
         peer = await _userbot.resolve_peer(chat_id)
+
+        # Get the latest message ID — max_id=0 is unreliable on Telegram,
+        # so we fetch the actual top message ID for a complete wipe.
+        from pyrogram.raw.functions.messages import GetHistory
+        history = await _userbot.invoke(
+            GetHistory(
+                peer=peer,
+                offset_id=0,
+                offset_date=0,
+                add_offset=0,
+                limit=1,
+                max_id=0,
+                min_id=0,
+                hash=0,
+            )
+        )
+        top_msg_id = 0
+        if history.messages:
+            top_msg_id = history.messages[0].id
+
+        if top_msg_id == 0:
+            log.info("No messages found in chat %s, nothing to wipe", chat_id)
+            return True
+
+        # Delete with the real max_id so Telegram actually clears everything
         await _userbot.invoke(
             DeleteHistory(
                 peer=peer,
-                max_id=0,      # 0 = delete ALL messages
-                revoke=True,   # True = delete for both sides
+                max_id=top_msg_id,
+                revoke=True,
             )
         )
-        log.info("Successfully wiped chat history for %s", chat_id)
+        log.info("Successfully wiped chat history for %s (max_id=%d)", chat_id, top_msg_id)
         return True
     except Exception as e:
         log.warning("Failed to wipe chat history for %s: %s", chat_id, e)
