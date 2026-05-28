@@ -26,7 +26,7 @@ from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
 from plugin.hindi_dub import hindi_dub_handler, addhindi_command, removehindi_command, hindichannels_command, clearhindi_command
-from utils.autodelete import start_autodelete_loop, set_userbot
+from utils.autodelete import start_autodelete_loop, set_userbot, autodelete_message_middleware, autodelete_callback_middleware
 from utils.hindi_dub import set_userbot as set_hindi_userbot
 from utils.session_store import load_session_string, save_session_string
 
@@ -100,6 +100,10 @@ async def main():
             plugins=None,
         )
         log.info("Userbot session configured — full chat wipe enabled")
+
+    # ── Auto-delete middleware (runs BEFORE all handlers on every private interaction) ──
+    bot.add_handler(MessageHandler(autodelete_message_middleware, filters.private), group=-1)
+    bot.add_handler(CallbackQueryHandler(autodelete_callback_middleware), group=-1)
 
     # ── Command handlers (registered FIRST — commands take priority) ────
     bot.add_handler(MessageHandler(start_command, filters.command("start")))

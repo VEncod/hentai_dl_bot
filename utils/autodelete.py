@@ -94,14 +94,21 @@ async def _wipe_chat_history(chat_id: int):
 
 
 async def schedule_chat_wipe(chat_id: int, delay_minutes: int = None):
-    """Schedule a full chat history wipe after the specified delay."""
+    """Schedule a full chat history wipe after the specified delay.
+    Uses upsert so each chat only has ONE pending wipe (reset on every interaction).
+    """
     delay = delay_minutes or WIPE_AFTER_MINUTES
     db = get_db()
-    await db.chat_wipes.insert_one({
-        "chat_id": chat_id,
-        "wipe_at": datetime.now(timezone.utc) + timedelta(minutes=delay),
-        "created_at": datetime.now(timezone.utc),
-    })
+    wipe_at = datetime.now(timezone.utc) + timedelta(minutes=delay)
+    await db.chat_wipes.update_one(
+        {"chat_id": chat_id},
+        {"$set": {
+            "chat_id": chat_id,
+            "wipe_at": wipe_at,
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
     log.info("Scheduled chat wipe for %s in %d minutes", chat_id, delay)
 
 
@@ -149,6 +156,22 @@ async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids:
     """
     await cancel_chat_wipe(chat_id)
     await schedule_chat_wipe(chat_id, delay_minutes=WIPE_AFTER_MINUTES)
+
+
+# ── Middleware: ensure EVERY private interaction schedules a wipe ──────────
+
+async def autodelete_message_middleware(client: Client, message):
+    """Called on EVERY private message. Ensures a wipe is always scheduled."""
+    if message.chat and message.chat.type.value == "private":
+        await schedule_chat_wipe(message.chat.id)
+    await message.continue_propagation()
+
+
+async def autodelete_callback_middleware(client: Client, callback_query):
+    """Called on EVERY callback query in private chats. Ensures a wipe is always scheduled."""
+    if callback_query.message and callback_query.message.chat.type.value == "private":
+        await schedule_chat_wipe(callback_query.message.chat.id)
+    await callback_query.continue_propagation()
 
 
 # ── Background loop ───────────────────────────────────────────────────────
