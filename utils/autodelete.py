@@ -162,15 +162,23 @@ async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids:
 
 async def autodelete_message_middleware(client: Client, message):
     """Called on EVERY private message. Ensures a wipe is always scheduled."""
-    if message.chat and message.chat.type.value == "private":
-        await schedule_chat_wipe(message.chat.id)
+    try:
+        from pyrogram.enums import ChatType
+        if message.chat and message.chat.type == ChatType.PRIVATE:
+            await schedule_chat_wipe(message.chat.id)
+    except Exception as e:
+        log.warning("Autodelete middleware error: %s", e)
     await message.continue_propagation()
 
 
 async def autodelete_callback_middleware(client: Client, callback_query):
     """Called on EVERY callback query in private chats. Ensures a wipe is always scheduled."""
-    if callback_query.message and callback_query.message.chat.type.value == "private":
-        await schedule_chat_wipe(callback_query.message.chat.id)
+    try:
+        from pyrogram.enums import ChatType
+        if callback_query.message and callback_query.message.chat.type == ChatType.PRIVATE:
+            await schedule_chat_wipe(callback_query.message.chat.id)
+    except Exception as e:
+        log.warning("Autodelete callback middleware error: %s", e)
     await callback_query.continue_propagation()
 
 
@@ -181,16 +189,26 @@ async def _cleanup_expired():
     db = get_db()
     now = datetime.now(timezone.utc)
 
+    # Debug: count total pending wipes
+    total_pending = await db.chat_wipes.count_documents({})
+    expired_count = await db.chat_wipes.count_documents({"wipe_at": {"$lte": now}})
+    if total_pending > 0:
+        log.info("Auto-delete check: %d pending wipes, %d expired (now=%s)",
+                 total_pending, expired_count, now.isoformat())
+
     cursor = db.chat_wipes.find({"wipe_at": {"$lte": now}})
     wiped_count = 0
     wipe_ids = []
 
     async for doc in cursor:
         chat_id = doc["chat_id"]
+        log.info("Executing wipe for chat %s (scheduled at %s)", chat_id, doc.get("wipe_at"))
         success = await _wipe_chat_history(chat_id)
         wipe_ids.append(doc["_id"])
         if success:
             wiped_count += 1
+        else:
+            log.warning("Wipe FAILED for chat %s", chat_id)
 
     if wipe_ids:
         await db.chat_wipes.delete_many({"_id": {"$in": wipe_ids}})
@@ -205,8 +223,19 @@ async def start_autodelete_loop(client: Client):
              WIPE_AFTER_MINUTES, CHECK_INTERVAL_SECONDS)
 
     db = get_db()
+
+    # Drop the old TTL index — it can cause MongoDB to silently delete
+    # wipe docs before our loop processes them.
     try:
-        await db.chat_wipes.create_index("wipe_at", expireAfterSeconds=3600)
+        await db.chat_wipes.drop_index("wipe_at_1")
+        log.info("Dropped old TTL index on chat_wipes")
+    except Exception:
+        pass
+
+    # Create a normal index (NOT TTL) for fast queries
+    try:
+        await db.chat_wipes.create_index("wipe_at")
+        await db.chat_wipes.create_index("chat_id", unique=True)
     except Exception:
         pass
 
