@@ -39,59 +39,54 @@ async def _wipe_chat_history(chat_id: int):
         return False
 
     try:
-        from pyrogram.raw.functions.messages import GetHistory
+        from pyrogram.raw.functions.messages import GetHistory, AffectedHistory
+        from pyrogram.raw.functions.messages import DeleteHistory as RawDeleteHistory
 
         peer = await _userbot.resolve_peer(chat_id)
 
-        # Loop DeleteHistory until chat is fully empty — Telegram sometimes
-        # doesn't delete everything in a single call.
-        for attempt in range(10):
-            history = await _userbot.invoke(
-                GetHistory(
-                    peer=peer,
-                    offset_id=0,
-                    offset_date=0,
-                    add_offset=0,
-                    limit=1,
-                    max_id=0,
-                    min_id=0,
-                    hash=0,
-                )
-            )
-
-            if not history.messages:
-                log.info("Chat %s fully wiped after %d call(s)", chat_id, attempt or 1)
-                return True
-
-            top_msg_id = history.messages[0].id
-
-            await _userbot.invoke(
+        # ── Strategy 1: Loop DeleteHistory until pts_count == 0 ───────
+        for attempt in range(20):
+            result = await _userbot.invoke(
                 DeleteHistory(
                     peer=peer,
-                    max_id=top_msg_id,
+                    max_id=2147483647,  # INT32_MAX — delete absolutely everything
                     revoke=True,
                 )
             )
-            log.info("DeleteHistory call %d for chat %s (max_id=%d)", attempt + 1, chat_id, top_msg_id)
-            await asyncio.sleep(1)  # Brief pause between attempts
+            log.info("DeleteHistory attempt %d for chat %s — pts_count=%s",
+                     attempt + 1, chat_id, getattr(result, "pts_count", "?"))
 
-        # If loop exhausted, fall back to bulk message deletion
-        log.warning("DeleteHistory didn't fully clear chat %s, falling back to bulk delete", chat_id)
-        async for msg in _userbot.get_chat_history(chat_id, limit=500):
-            pass  # collect IDs
+            # pts_count == 0 means nothing left to delete
+            if hasattr(result, "pts_count") and result.pts_count == 0:
+                break
+            await asyncio.sleep(0.5)
+
+        # ── Strategy 2: Verify & bulk-delete any survivors ────────────
         msg_ids = []
-        async for msg in _userbot.get_chat_history(chat_id, limit=500):
+        async for msg in _userbot.get_chat_history(chat_id, limit=1000):
             msg_ids.append(msg.id)
+
         if msg_ids:
-            # delete_messages handles batches of 100 internally
+            log.warning("Chat %s still has %d messages after DeleteHistory, bulk deleting", chat_id, len(msg_ids))
             for i in range(0, len(msg_ids), 100):
-                batch = msg_ids[i:i+100]
+                batch = msg_ids[i:i + 100]
                 try:
                     await _userbot.delete_messages(chat_id, batch, revoke=True)
-                except Exception:
-                    pass
-            log.info("Bulk-deleted %d remaining messages in chat %s", len(msg_ids), chat_id)
+                except Exception as e:
+                    log.warning("Bulk delete batch failed for chat %s: %s", chat_id, e)
+                await asyncio.sleep(0.3)
 
+        # ── Strategy 3: Final check — if STILL not empty, one more DeleteHistory
+        remaining = []
+        async for msg in _userbot.get_chat_history(chat_id, limit=5):
+            remaining.append(msg.id)
+        if remaining:
+            log.warning("Chat %s STILL has messages after bulk delete, final DeleteHistory", chat_id)
+            await _userbot.invoke(
+                DeleteHistory(peer=peer, max_id=2147483647, revoke=True)
+            )
+
+        log.info("Chat wipe complete for %s", chat_id)
         return True
     except Exception as e:
         log.warning("Failed to wipe chat history for %s: %s", chat_id, e)
