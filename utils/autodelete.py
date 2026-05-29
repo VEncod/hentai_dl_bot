@@ -197,23 +197,24 @@ async def _cleanup_expired():
 
     cursor = db.chat_wipes.find({"wipe_at": {"$lte": now}})
     wiped_count = 0
-    wipe_ids = []
+    failed_count = 0
 
     async for doc in cursor:
         chat_id = doc["chat_id"]
         log.info("Executing wipe for chat %s (scheduled at %s)", chat_id, doc.get("wipe_at"))
         success = await _wipe_chat_history(chat_id)
-        wipe_ids.append(doc["_id"])
         if success:
+            # Only remove the doc if wipe succeeded
+            await db.chat_wipes.delete_one({"_id": doc["_id"]})
             wiped_count += 1
         else:
-            log.warning("Wipe FAILED for chat %s", chat_id)
-
-    if wipe_ids:
-        await db.chat_wipes.delete_many({"_id": {"$in": wipe_ids}})
+            failed_count += 1
+            log.warning("Wipe FAILED for chat %s — will retry next cycle", chat_id)
 
     if wiped_count:
         log.info("Auto-delete: wiped %d chats", wiped_count)
+    if failed_count:
+        log.warning("Auto-delete: %d wipes failed, will retry in %ds", failed_count, CHECK_INTERVAL_SECONDS)
 
 
 async def start_autodelete_loop(client: Client):
