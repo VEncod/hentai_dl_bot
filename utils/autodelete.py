@@ -57,45 +57,71 @@ async def _wipe_chat(chat_id: int):
         log.info("No tracked messages for chat %s, nothing to delete", chat_id)
         return True
 
-    log.info("Wiping chat %s: %d tracked messages", chat_id, len(msg_ids))
+    log.info("Wiping chat %s: %d tracked messages: %s", chat_id, len(msg_ids), msg_ids)
     deleted = 0
 
-    # Delete in batches of 100 (Telegram limit)
+    # Use raw MTProto DeleteMessages through the bot — gives us actual result
+    from pyrogram.raw.functions.messages import DeleteMessages
+
     for i in range(0, len(msg_ids), 100):
         batch = msg_ids[i:i + 100]
 
-        # Try bot first (can delete its own messages + user messages in private chats)
+        # Try via bot (raw API)
         if _bot:
             try:
-                await _bot.delete_messages(chat_id, batch)
-                deleted += len(batch)
-                continue
+                result = await _bot.invoke(DeleteMessages(id=batch, revoke=True))
+                pts = getattr(result, "pts_count", 0)
+                log.info("Bot raw DeleteMessages for chat %s: pts_count=%s (batch=%s)",
+                         chat_id, pts, batch)
+                deleted += pts
+                if pts > 0:
+                    continue
             except Exception as e:
-                log.debug("Bot delete failed for chat %s: %s", chat_id, e)
+                log.warning("Bot raw DeleteMessages failed for chat %s: %s", chat_id, e)
 
-        # Fallback to userbot
+        # Try via userbot (raw API)
         if _userbot:
             try:
-                await _userbot.delete_messages(chat_id, batch)
-                deleted += len(batch)
-                continue
+                result = await _userbot.invoke(DeleteMessages(id=batch, revoke=True))
+                pts = getattr(result, "pts_count", 0)
+                log.info("Userbot raw DeleteMessages for chat %s: pts_count=%s (batch=%s)",
+                         chat_id, pts, batch)
+                deleted += pts
+                if pts > 0:
+                    continue
             except Exception as e:
-                log.debug("Userbot delete failed for chat %s: %s", chat_id, e)
+                log.warning("Userbot raw DeleteMessages failed for chat %s: %s", chat_id, e)
 
-        log.warning("Could not delete batch for chat %s", chat_id)
+        # Try high-level API as last resort
+        for client_name, client in [("bot", _bot), ("userbot", _userbot)]:
+            if not client:
+                continue
+            try:
+                await client.delete_messages(chat_id, batch)
+                log.info("%s high-level delete_messages for chat %s batch=%s", client_name, chat_id, batch)
+                deleted += len(batch)
+                break
+            except Exception as e:
+                log.warning("%s high-level delete failed for chat %s: %s", client_name, chat_id, e)
 
-    log.info("Chat wipe done for %s: deleted %d/%d messages", chat_id, deleted, len(msg_ids))
+    log.info("Chat wipe done for %s: deleted %d messages (tracked %d)", chat_id, deleted, len(msg_ids))
 
-    # If userbot available, also try DeleteHistory as final cleanup
+    # Also try to get and delete any untracked messages via userbot
     if _userbot:
         try:
-            from pyrogram.raw.functions.messages import DeleteHistory
-            peer = await _userbot.resolve_peer(chat_id)
-            await _userbot.invoke(
-                DeleteHistory(peer=peer, max_id=2147483647, revoke=True)
-            )
-        except Exception:
-            pass
+            remaining = []
+            async for msg in _userbot.get_chat_history(chat_id, limit=200):
+                remaining.append(msg.id)
+            if remaining:
+                log.info("Found %d untracked messages in chat %s, deleting", len(remaining), chat_id)
+                for i in range(0, len(remaining), 100):
+                    batch = remaining[i:i + 100]
+                    try:
+                        await _userbot.delete_messages(chat_id, batch, revoke=True)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.debug("Userbot cleanup for chat %s: %s", chat_id, e)
 
     return True
 
