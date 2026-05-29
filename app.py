@@ -25,9 +25,7 @@ from plugin.channels import (
 from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
-from plugin.hindi_dub import hindi_dub_handler, addhindi_command, removehindi_command, hindichannels_command, clearhindi_command
 from utils.autodelete import start_autodelete_loop, set_userbot, autodelete_message_middleware, autodelete_callback_middleware
-from utils.hindi_dub import set_userbot as set_hindi_userbot
 from utils.session_store import load_session_string, save_session_string
 
 # ── Logging ─────────────────────────────────────────────────────────────
@@ -137,11 +135,7 @@ async def main():
     # Broadcast
     bot.add_handler(MessageHandler(broadcast_command, filters.command("broadcast")))
 
-    # Hindi dub admin commands
-    bot.add_handler(MessageHandler(addhindi_command, filters.command("addhindi")))
-    bot.add_handler(MessageHandler(removehindi_command, filters.command("removehindi")))
-    bot.add_handler(MessageHandler(hindichannels_command, filters.command("hindichannels")))
-    bot.add_handler(MessageHandler(clearhindi_command, filters.command("clearhindi")))
+
 
     # Search — LAST message handler (catches any non-command text)
     bot.add_handler(MessageHandler(hentaisearch, filters.text & ~filters.regex(r"^/") & filters.private))
@@ -153,7 +147,6 @@ async def main():
     bot.add_handler(CallbackQueryHandler(hentaidl, filters.regex(r"^dlt_")))
 
     bot.add_handler(CallbackQueryHandler(batch_download, filters.regex(r"^ball_")))
-    bot.add_handler(CallbackQueryHandler(hindi_dub_handler, filters.regex(r"^hindi_")))
     bot.add_handler(CallbackQueryHandler(catalog_episodes_callback, filters.regex(r"^cat_")))
     bot.add_handler(CallbackQueryHandler(approve_callback, filters.regex(r"^apr_")))
     bot.add_handler(CallbackQueryHandler(reject_callback, filters.regex(r"^rej_")))
@@ -166,8 +159,7 @@ async def main():
     if userbot:
         await userbot.start()
         set_userbot(userbot)
-        set_hindi_userbot(userbot)
-        log.info("Userbot started — user message deletion + Hindi dub search enabled")
+        log.info("Userbot started — user message deletion enabled")
 
     await bot.set_bot_commands([
         BotCommand("start", "Start the bot"),
