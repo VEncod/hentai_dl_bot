@@ -39,8 +39,7 @@ async def _wipe_chat_history(chat_id: int):
         return False
 
     try:
-        from pyrogram.raw.functions.messages import GetHistory, AffectedHistory
-        from pyrogram.raw.functions.messages import DeleteHistory as RawDeleteHistory
+        from pyrogram.raw.functions.messages import GetHistory
 
         peer = await _userbot.resolve_peer(chat_id)
 
