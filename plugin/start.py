@@ -19,6 +19,7 @@ from pyrogram.types import (
 
 from pymongo import ReturnDocument
 from utils.db import get_db
+from utils.autodelete import track_message
 from utils.fsub import check_force_sub, send_force_sub_message
 from utils.autodelete import schedule_chat_wipe, cancel_chat_wipe
 
@@ -106,6 +107,9 @@ async def _send_welcome(client: Client, chat_id: int, text: str) -> Message | No
 
     if not msg:
         msg = await client.send_message(chat_id=chat_id, text=text)
+
+    if msg:
+        await track_message(chat_id, msg.id)
 
     return msg
 
