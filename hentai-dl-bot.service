@@ -1,0 +1,15 @@
+[Unit]
+Description=Hentai DL Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/hentai_dl_bot
+EnvironmentFile=/root/hentai_dl_bot/.env
+ExecStart=/root/hentai_dl_bot/venv/bin/python3 app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -62,39 +62,124 @@ A powerful Telegram bot to search, stream, and download hentai videos directly t
 
 ---
 
-## 🚀 Deploy to Railway
+## 🚀 Deployment
 
-### Step 1: Fork the Repository
+### Option 1: Railway (One-Click Cloud Deploy)
+
+#### Step 1: Fork the Repository
 
 Fork this repo to your GitHub account.
 
-### Step 2: Create a Railway Project
+#### Step 2: Create a Railway Project
 
 1. Go to [railway.app](https://railway.app)
 2. Click **"New Project"**
 3. Select **"Deploy from GitHub Repo"**
 4. Connect your GitHub account and select the forked repo
 
-### Step 3: Add Environment Variables
+#### Step 3: Add Environment Variables
 
 Go to your service → **Variables** tab and add:
 
-| Variable | Description | Example |
+| Variable | Required | Description |
 |---|---|---|
-| `API_ID` | Telegram API ID from [my.telegram.org](https://my.telegram.org) | `12345678` |
-| `API_HASH` | Telegram API Hash from [my.telegram.org](https://my.telegram.org) | `abcdef1234567890abcdef1234567890` |
-| `BOT_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) | `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11` |
-| `MONGO_URL` | MongoDB connection string | `mongodb+srv://user:pass@cluster.mongodb.net/` |
+| `API_ID` | ✅ | Telegram API ID from [my.telegram.org](https://my.telegram.org) |
+| `API_HASH` | ✅ | Telegram API Hash from [my.telegram.org](https://my.telegram.org) |
+| `BOT_TOKEN` | ✅ | Bot token from [@BotFather](https://t.me/BotFather) |
+| `MONGO_URL` | ✅ | MongoDB connection string |
+| `SESSION_STRING` | ❌ | Pyrogram session string (enables userbot features) |
 
 > 💡 **Get a free MongoDB:** Sign up at [MongoDB Atlas](https://www.mongodb.com/atlas) and create a free M0 cluster.
 
-### Step 4: Deploy
+#### Step 4: Deploy
 
-Railway will automatically detect the `nixpacks.toml` configuration and install all dependencies including ffmpeg. Click **Deploy** and wait for the build to complete.
+Railway will automatically detect the Dockerfile and install all dependencies including FFmpeg and N_m3u8DL-RE. Click **Deploy** and wait for the build to complete.
 
-### Step 5: First Start
+---
 
-Send `/start` to your bot on Telegram. The **first user** to send `/start` automatically becomes the **owner** (super admin).
+### Option 2: VPS / Local Server (Ubuntu/Debian)
+
+#### Quick Setup (One Command)
+
+```bash
+git clone https://github.com/VEncod/hentai_dl_bot.git
+cd hentai_dl_bot
+chmod +x setup.sh
+./setup.sh
+```
+
+The setup script will:
+- Install system dependencies (Python3, FFmpeg, pip)
+- Create a Python virtual environment
+- Install all Python packages
+- Set up N_m3u8DL-RE binary
+- Create `.env` from template
+
+Then configure and start:
+
+```bash
+nano .env                    # Fill in your credentials
+source venv/bin/activate     # Activate virtual environment
+python3 app.py               # Start the bot
+```
+
+#### Run as a Systemd Service (auto-restart on crash/reboot)
+
+```bash
+# Edit paths in the service file if needed (default: /root/hentai_dl_bot)
+nano hentai-dl-bot.service
+
+# Install and enable the service
+sudo cp hentai-dl-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable hentai-dl-bot
+sudo systemctl start hentai-dl-bot
+
+# Check status
+sudo systemctl status hentai-dl-bot
+
+# View live logs
+sudo journalctl -u hentai-dl-bot -f
+```
+
+#### Run with Docker Compose
+
+```bash
+git clone https://github.com/VEncod/hentai_dl_bot.git
+cd hentai_dl_bot
+
+# Create and edit .env
+cp .env.example .env
+nano .env
+
+# Build and start
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+---
+
+### Option 3: Kaggle / Google Colab
+
+```python
+!git clone https://github.com/VEncod/hentai_dl_bot.git
+%cd hentai_dl_bot
+!pip install -r requirements.txt
+!chmod +x binary/N_m3u8DL-RE
+
+import os
+os.environ["API_ID"] = "your_api_id"
+os.environ["API_HASH"] = "your_api_hash"
+os.environ["BOT_TOKEN"] = "your_bot_token"
+os.environ["MONGO_URL"] = "your_mongo_url"
+
+!python3 app.py
+```
 
 ---
 
@@ -113,12 +198,36 @@ Send `/start` to your bot on Telegram. The **first user** to send `/start` autom
 
 ---
 
+## ⚙️ Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `API_ID` | ✅ | Telegram API ID from [my.telegram.org](https://my.telegram.org) |
+| `API_HASH` | ✅ | Telegram API Hash |
+| `BOT_TOKEN` | ✅ | Bot token from [@BotFather](https://t.me/BotFather) |
+| `MONGO_URL` | ✅ | MongoDB connection string |
+| `SESSION_STRING` | ❌ | Pyrogram session string (enables userbot message deletion) |
+
+---
+
+## 🔧 Engines
+
+| Engine | Purpose |
+|---|---|
+| **[N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE)** | Primary HLS downloader — fast, handles complex M3U8 playlists |
+| **[FFmpeg](https://ffmpeg.org/)** | Fallback downloader + video processing |
+
+Both engines are automatically installed during setup. N_m3u8DL-RE is bundled in the `binary/` directory, and FFmpeg is installed via the system package manager.
+
+---
+
 ## 🧰 Tech Stack
 
 - **[Pyrofork](https://github.com/Mayuri-Chan/pyrofork)** — Modern async Pyrogram fork for Telegram Bot API
 - **[Motor](https://motor.readthedocs.io/)** — Async MongoDB driver
 - **[aiohttp](https://aiohttp.readthedocs.io/)** — Async HTTP client
-- **[FFmpeg](https://ffmpeg.org/)** — Video processing and HLS stream downloading
+- **[N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE)** — HLS stream downloader
+- **[FFmpeg](https://ffmpeg.org/)** — Video processing and stream downloading
 - **[MongoDB](https://www.mongodb.com/)** — Database for users, cache, config, and archives
 - **[Hanime.tv API](https://hanime.tv/)** — Video search and streaming data
 
@@ -130,4 +239,4 @@ See [LICENSE](LICENSE) for details.
 
 ---
 
-**⚡ **Powered by Hanime.tv API Powered by HentaiFF.com & FFmpeg FFmpeg | 👨‍💻 Created by [Mr. Aman](https://t.me/Am_ankhan)**
+**⚡ Powered by N_m3u8DL-RE & FFmpeg | 👨‍💻 Created by [Mr. Aman](https://t.me/Am_ankhan)**
