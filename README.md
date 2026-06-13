@@ -164,7 +164,50 @@ docker compose down
 
 ---
 
-### Option 3: Kaggle / Google Colab
+### Option 4: AWS EC2 (Docker - One Command Setup)
+
+Deploy the bot on AWS EC2 so it runs in the background permanently, survives SSH disconnection, auto-restarts on crash, and starts on reboot.
+
+#### Requirements
+- AWS EC2 instance (Ubuntu) with at least **2GB RAM** and **8GB storage**
+- SSH access to the instance
+
+#### Step 1: Add Swap Space (Recommended)
+
+Prevents upload failures due to low memory:
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile && echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+#### Step 2: Clone and Run Setup
+
+```bash
+cd ~ && git clone https://github.com/VEncod/hentai_dl_bot.git && cd hentai_dl_bot && chmod +x ec2-docker-setup.sh && ./ec2-docker-setup.sh
+```
+
+The script will:
+- Install Docker and Docker Compose
+- Ask for your environment variables (API_ID, API_HASH, BOT_TOKEN, MONGO_URL, SESSION_STRING)
+- Build the Docker image and start the bot in the background
+
+#### After Setup
+
+The bot runs in the background. You can safely close SSH — the bot stays running.
+
+| Action | Command |
+| :--- | :--- |
+| Check status | `sudo docker compose ps` |
+| View logs | `sudo docker compose logs -f` |
+| Restart bot | `sudo docker compose restart` |
+| Stop bot | `sudo docker compose down` |
+| Start bot | `sudo docker compose up -d` |
+
+The bot will **auto-restart** on crash and **start automatically** on server reboot.
+
+---
+
+### Option 5: Kaggle / Google Colab
 
 ```python
 !git clone https://github.com/VEncod/hentai_dl_bot.git
