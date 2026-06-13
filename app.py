@@ -3,6 +3,13 @@ import sys
 import asyncio
 import logging
 
+# Load .env file if present (for local/VPS deployment)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from pyrogram import Client, filters, idle
 from pyrogram.types import BotCommand
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler
