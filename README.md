@@ -205,6 +205,20 @@ The bot runs in the background. You can safely close SSH — the bot stays runni
 
 The bot will **auto-restart** on crash and **start automatically** on server reboot.
 
+#### For Amazon Linux EC2 (Cheaper)
+
+Amazon Linux costs ~20% less than Ubuntu for the same specs. Use this instead:
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile && echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+```bash
+cd ~ && git clone https://github.com/VEncod/hentai_dl_bot.git && cd hentai_dl_bot && chmod +x ec2-amazon-linux-setup.sh && ./ec2-amazon-linux-setup.sh
+```
+
+Same management commands apply after setup.
+
 ---
 
 ### Option 5: Kaggle / Google Colab
