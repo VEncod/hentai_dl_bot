@@ -27,22 +27,28 @@ fi
 sudo systemctl start docker
 sudo systemctl enable docker
 
-# Install Docker Compose plugin if not present
-if ! sudo docker compose version &> /dev/null; then
-    echo "Installing Docker Compose plugin..."
-    sudo mkdir -p /usr/local/lib/docker/cli-plugins
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "aarch64" ]; then
-        COMPOSE_ARCH="aarch64"
-    else
-        COMPOSE_ARCH="x86_64"
-    fi
-    sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${COMPOSE_ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-compose
-    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-    echo "Docker Compose installed successfully!"
+# Install Docker Compose plugin and Buildx
+echo "Installing Docker Compose and Buildx plugins..."
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    COMPOSE_ARCH="aarch64"
+    BUILDX_ARCH="arm64"
 else
-    echo "Docker Compose is already installed."
+    COMPOSE_ARCH="x86_64"
+    BUILDX_ARCH="amd64"
 fi
+
+# Install Docker Compose
+sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${COMPOSE_ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Install Docker Buildx
+BUILDX_VERSION=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+sudo curl -SL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${BUILDX_ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-buildx
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
+echo "Docker Compose and Buildx installed successfully!"
 
 # Clone or update the repository
 REPO_DIR="$HOME/hentai_dl_bot"
