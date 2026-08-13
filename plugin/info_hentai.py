@@ -49,11 +49,14 @@ async def _send_with_poster(client, chat_id, poster_url, text, keyboard):
                 pass
 
 
+from utils.slug_map import get_short_slug, resolve_slug
+
 @approved_only
 @force_sub
 async def infohentai(client: Client, callback_query: CallbackQuery):
     """Show details for a selected hentai (info_<slug> callback)."""
-    slug = callback_query.data.split("_", 1)[1]
+    raw_slug = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_slug)
     chat_id = callback_query.from_user.id
     log.info("=== INFO HANDLER CALLED for slug=%s ===", slug)
 
@@ -61,7 +64,15 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
 
     try:
-        await callback_query.answer("Loading details...")
+        await callback_query.answer("⚡ Loading details...")
+    except Exception:
+        pass
+
+    try:
+        await callback_query.edit_message_text(
+            f"⏳ **Loading Details & Media...**\n"
+            f"Fetching title details and poster image..."
+        )
     except Exception:
         pass
 
@@ -90,21 +101,22 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     if len(tags) > 10:
         tags_str += f" (+{len(tags) - 10} more)"
 
+    brand = info.get("brand") or "HentaiHaven"
     text = (
         f"**{name}**\n\n"
+        f"🌐 **Source:** {brand}\n"
         f"📝 **Summary:** {summary}\n"
         f"🔖 **Tags:** {tags_str}"
     )
 
+    short_key = await get_short_slug(slug)
     buttons = []
-
-    buttons.append([InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{slug}")])
+    buttons.append([InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{short_key}")])
     
-    # Add batch download button if there are multiple episodes
     if len(episodes) > 1:
-        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{slug}")])
+        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{short_key}")])
     
-    buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")])
+    buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{short_key}")])
 
     keyboard = InlineKeyboardMarkup(buttons)
 
@@ -147,7 +159,8 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
 @force_sub
 async def episode_info(client: Client, callback_query: CallbackQuery):
     """Show download/stream options for a specific episode (eps_<slug>)."""
-    slug = callback_query.data.split("_", 1)[1]
+    raw_slug = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_slug)
     log.info("=== EPISODE INFO CALLED for slug=%s ===", slug)
 
     try:
@@ -184,16 +197,17 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
     
     has_multiple_eps = series_info and len(series_info.get("episodes", [])) > 1
     
+    short_key = await get_short_slug(slug)
     buttons = [
-        [InlineKeyboardButton("⬇️ Download", callback_data=f"dlt_{slug}")],
+        [InlineKeyboardButton("⬇️ Download", callback_data=f"dlt_{short_key}")],
     ]
     
     if has_multiple_eps:
-        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{slug}")])
+        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{short_key}")])
     
     buttons.extend([
-        [InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{slug}")],
-        [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{slug}")],
+        [InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{short_key}")],
+        [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{short_key}")],
     ])
     
     keyboard = InlineKeyboardMarkup(buttons)

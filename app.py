@@ -19,7 +19,8 @@ from utils.db import init_db
 from plugin.start import start_command, checksub_callback
 from plugin.search_hentai import hentaisearch
 from plugin.info_hentai import infohentai, episode_info
-from plugin.video_hentai import hentailink, hentaidl, batch_download
+from plugin.video_hentai import hentailink, hentaidl, batch_download, cancel_download_callback
+from plugin.delete import delete_command, delete_callback_handler
 from plugin.admin import addadmin_command, removeadmin_command, admins_command, clearcache_command
 from plugin.users import (
     request_command, approve_command, reject_command, revoke_command,
@@ -139,10 +140,11 @@ async def main():
     bot.add_handler(MessageHandler(archive_command, filters.command("archive")))
     bot.add_handler(MessageHandler(series_command, filters.command("series")))
 
+    # Delete management command
+    bot.add_handler(MessageHandler(delete_command, filters.command(["delete", "delete_file", "del"])))
+
     # Broadcast
     bot.add_handler(MessageHandler(broadcast_command, filters.command("broadcast")))
-
-
 
     # Search — LAST message handler (catches any non-command text)
     bot.add_handler(MessageHandler(hentaisearch, filters.text & ~filters.regex(r"^/") & filters.private))
@@ -152,6 +154,8 @@ async def main():
     bot.add_handler(CallbackQueryHandler(episode_info, filters.regex(r"^eps_")))
     bot.add_handler(CallbackQueryHandler(hentailink, filters.regex(r"^link_")))
     bot.add_handler(CallbackQueryHandler(hentaidl, filters.regex(r"^dlt_")))
+    bot.add_handler(CallbackQueryHandler(cancel_download_callback, filters.regex(r"^canceldl_")))
+    bot.add_handler(CallbackQueryHandler(delete_callback_handler, filters.regex(r"^(del_|delfile_|delpage_|delall_)")))
 
     bot.add_handler(CallbackQueryHandler(batch_download, filters.regex(r"^ball_")))
     bot.add_handler(CallbackQueryHandler(catalog_episodes_callback, filters.regex(r"^cat_")))
@@ -164,12 +168,17 @@ async def main():
 
     # Start userbot if configured
     if userbot:
-        await userbot.start()
-        set_userbot(userbot)
-        log.info("Userbot started — user message deletion enabled")
+        try:
+            await userbot.start()
+            set_userbot(userbot)
+            log.info("Userbot started — user message deletion enabled")
+        except Exception as e:
+            log.warning("Userbot start failed (%s) — continuing with main bot only", e)
+            userbot = None
 
     await bot.set_bot_commands([
         BotCommand("start", "Start the bot"),
+        BotCommand("delete", "Delete downloaded files from MongoDB & channels"),
         BotCommand("request", "Request access to use the bot"),
         BotCommand("archive", "Browse archived episodes"),
         BotCommand("series", "List all archived series"),

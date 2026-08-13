@@ -5,3 +5,6 @@ __pycache__/
 *.session
 *.session-journal
 *.mp4
+binary/Logs/
+test_video/
+tmp_posters/

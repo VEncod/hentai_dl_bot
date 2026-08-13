@@ -41,12 +41,17 @@ PROGRESS_UPDATE_INTERVAL = 2.0
 PROGRESS_MIN_PERCENT_STEP = 3
 
 
+from utils.slug_map import get_short_slug, resolve_slug
+
+
 async def hentailink(client: Client, callback_query: CallbackQuery):
     log.info("=== LINK HANDLER CALLED === data=%s", callback_query.data)
-    slug = callback_query.data.split("_", 1)[1]
+    raw_slug = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_slug)
+    short_key = await get_short_slug(slug)
 
     keyboard = [
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"info_{slug}")]
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"info_{short_key}")]
     ]
 
     await callback_query.edit_message_text(
@@ -281,9 +286,41 @@ class UploadProgressTracker:
         return msg
 
 
-async def _safe_edit(callback_query: CallbackQuery, text: str):
+ACTIVE_DOWNLOADS = {}
+
+
+async def cancel_download_callback(client: Client, callback_query: CallbackQuery):
+    chat_id = callback_query.from_user.id
+    if chat_id in ACTIVE_DOWNLOADS:
+        dl_info = ACTIVE_DOWNLOADS[chat_id]
+        dl_info["cancelled"] = True
+        proc = dl_info.get("process")
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        filename = dl_info.get("filename")
+        if filename and os.path.exists(filename):
+            try:
+                os.unlink(filename)
+            except Exception:
+                pass
+        slug = dl_info.get("slug", "")
+        ACTIVE_DOWNLOADS.pop(chat_id, None)
+        await callback_query.answer("🛑 Download cancelled!", show_alert=True)
+        await _safe_edit(
+            callback_query,
+            f"🛑 **Download Cancelled**\n\n"
+            f"Download of **{slug}** was stopped by user."
+        )
+    else:
+        await callback_query.answer("No active download to cancel.", show_alert=True)
+
+
+async def _safe_edit(callback_query: CallbackQuery, text: str, reply_markup=None):
     try:
-        await callback_query.edit_message_text(text)
+        await callback_query.edit_message_text(text, reply_markup=reply_markup)
     except Exception:
         pass
 
@@ -350,6 +387,10 @@ async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None) -> bool:
         return False
 
     try:
+        try:
+            os.chmod(N_M3U8DL_RE, 0o755)
+        except Exception:
+            pass
         start_time = time.time()
         
         process = await asyncio.create_subprocess_exec(
@@ -367,6 +408,8 @@ async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        for dl in ACTIVE_DOWNLOADS.values():
+            dl["process"] = process
 
         if progress_cb:
             expected_duration = 90
@@ -443,6 +486,8 @@ async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None) -> boo
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        for dl in ACTIVE_DOWNLOADS.values():
+            dl["process"] = process
 
         if progress_cb:
             expected_duration = 120
@@ -509,7 +554,8 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("No access.", show_alert=True)
         return
 
-    slug = callback_query.data.split("_", 1)[1]
+    raw_slug = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_slug)
     chat_id = callback_query.from_user.id
     username = callback_query.from_user.username
     db = get_db()
@@ -599,43 +645,97 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         return
 
     filename = f"{slug}.mp4"
-    downloaded = False
+    cancel_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛑 Stop Download", callback_data=f"canceldl_{chat_id}")]
+    ])
 
-    # Progress callback with detailed stats
-    async def on_progress(stats):
-        msg = tracker.format_message(stats, title="Downloading...", slug=slug)
-        await _safe_edit(callback_query, msg)
-        if log_msg_id:
-            await log_download_progress(client, log_msg_id, username, slug, stats["pct"])
+    ACTIVE_DOWNLOADS[chat_id] = {
+        "task": asyncio.current_task(),
+        "slug": slug,
+        "cancelled": False,
+        "process": None,
+        "filename": filename,
+    }
 
-    # Try direct download first
-    if dl_url and not dl_url.endswith('.m3u8'):
-        tracker = DownloadProgressTracker(0, start_time)
-        downloaded = await _download_direct(dl_url, filename, on_progress)
+    await _safe_edit(
+        callback_query,
+        f"🚀 **Preparing Download**\n\n{_progress_bar(0)}\n\n⏳ Please wait...",
+        reply_markup=cancel_keyboard
+    )
 
-    # Try HLS download
-    if not downloaded:
-        hls_url = dl_url if dl_url else None
-        if not hls_url:
-            for s in streams:
-                if s.get('kind') == 'hls' and s.get('url'):
-                    hls_url = s['url']
-                    break
-        if hls_url:
-            log.info("Attempting HLS download: %s", hls_url[:80])
+    try:
+        log_msg_id = await log_download_start(client, username, slug)
+
+        # Fetch streams
+        try:
+            data = await asyncio.to_thread(hanime_api.get_streams, slug)
+        except Exception:
+            log.exception("Failed to fetch streams for slug=%s", slug)
+            await _safe_edit(callback_query, "API unavailable. Please try again later.")
+            await log_error(client, username, f"Stream fetch failed for {slug}")
+            return
+
+        dl_url = data.get("dl_url", "")
+        streams = data.get("streams", [])
+        sources = data.get("sources", [])
+
+        log.info("Sources for %s: dl_url=%s, streams=%d, sources=%d",
+                 slug, dl_url[:60] if dl_url else None, len(streams), len(sources))
+
+        if not dl_url and not streams:
+            elapsed = int(time.time() - start_time)
+            await _safe_edit(
+                callback_query,
+                "❌ **No Download Sources Available**\n\n"
+                "This title may be region-locked or not yet available for download.\n"
+                "Try another episode or title."
+            )
+            await log_error(client, username, f"No sources/dl_url for {slug}")
+            return
+
+        downloaded = False
+
+        # Progress callback with detailed stats
+        async def on_progress(stats):
+            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                raise asyncio.CancelledError("Download cancelled by user")
+            msg = tracker.format_message(stats, title="Downloading...", slug=slug)
+            await _safe_edit(callback_query, msg, reply_markup=cancel_keyboard)
+            if log_msg_id:
+                await log_download_progress(client, log_msg_id, username, slug, stats["pct"])
+
+        # Try direct download first
+        if dl_url and not dl_url.endswith('.m3u8'):
             tracker = DownloadProgressTracker(0, start_time)
-            downloaded = await _download_n_m3u8dl(hls_url, filename, on_progress)
-            if not downloaded:
-                downloaded = await _download_hls_ffmpeg(hls_url, filename, on_progress)
+            downloaded = await _download_direct(dl_url, filename, on_progress)
 
-    # Failed
-    if not downloaded:
-        elapsed = int(time.time() - start_time)
-        await _safe_edit(callback_query, f"Download failed after {elapsed}s. No working streams found.")
-        await log_error(client, username, f"All download strategies failed for {slug}")
-        if os.path.exists(filename):
-            os.remove(filename)
-        return
+        # Try HLS download
+        if not downloaded:
+            hls_url = dl_url if dl_url else None
+            if not hls_url:
+                for s in streams:
+                    if s.get('kind') == 'hls' and s.get('url'):
+                        hls_url = s['url']
+                        break
+            if hls_url:
+                log.info("Attempting HLS download: %s", hls_url[:80])
+                tracker = DownloadProgressTracker(0, start_time)
+                downloaded = await _download_n_m3u8dl(hls_url, filename, on_progress)
+                if not downloaded:
+                    downloaded = await _download_hls_ffmpeg(hls_url, filename, on_progress)
+
+        # Failed
+        if not downloaded:
+            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                return
+            elapsed = int(time.time() - start_time)
+            await _safe_edit(callback_query, f"Download failed after {elapsed}s. No working streams found.")
+            await log_error(client, username, f"All download strategies failed for {slug}")
+            if os.path.exists(filename):
+                os.remove(filename)
+            return
+    finally:
+        ACTIVE_DOWNLOADS.pop(chat_id, None)
 
     if not os.path.exists(filename) or os.path.getsize(filename) == 0:
         await _safe_edit(callback_query, "Download produced an empty file.")
@@ -758,7 +858,8 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
 async def batch_download(client: Client, callback_query: CallbackQuery):
     """Download all episodes of a series (ball_<slug> callback)."""
-    slug = callback_query.data.split("_", 1)[1]
+    raw_slug = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_slug)
     chat_id = callback_query.from_user.id
     username = callback_query.from_user.username
 

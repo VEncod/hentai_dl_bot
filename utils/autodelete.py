@@ -1,60 +1,61 @@
 """
-Auto-delete — wipes entire chat history after a set delay.
+Auto-delete system — wipes chat history after a set delay.
 
-Tracks all message IDs (bot + user) per chat, then deletes them via the bot client.
-Userbot is used to delete user messages the bot can't delete.
-Pure in-memory asyncio timers — no MongoDB polling.
+Features:
+- Stores tracked message IDs in MongoDB (db.autodelete) so tracked messages survive bot restarts.
+- Auto-wipes private chat messages via Bot Client (and Userbot if configured).
 """
 
 import asyncio
 import logging
-
+from datetime import datetime, timezone
 from pyrogram import Client
+from utils.db import get_db
 
 log = logging.getLogger(__name__)
 
-# Wipe chat after 10 minutes
 WIPE_AFTER_MINUTES = 10
 
-# The bot client — set during startup
 _bot: Client | None = None
-
-# Optional userbot client
 _userbot: Client | None = None
-
-# In-memory: chat_id → set of message IDs to delete
-_tracked_messages: dict[int, set[int]] = {}
-
-# In-memory timers: chat_id → asyncio.Task
 _active_timers: dict[int, asyncio.Task] = {}
 
 
 def set_bot(client: Client):
-    """Register the bot client."""
     global _bot
     _bot = client
     log.info("Bot client registered for auto-delete")
 
 
 def set_userbot(client: Client):
-    """Register the userbot client for user message deletion."""
     global _userbot
     _userbot = client
     log.info("Userbot registered for auto-delete")
 
 
-def _track(chat_id: int, message_id: int):
-    """Track a message ID for later deletion."""
-    if chat_id not in _tracked_messages:
-        _tracked_messages[chat_id] = set()
-    _tracked_messages[chat_id].add(message_id)
+async def _track_db(chat_id: int, message_id: int):
+    try:
+        db = get_db()
+        await db.autodelete.update_one(
+            {"chat_id": chat_id},
+            {
+                "$addToSet": {"msg_ids": message_id},
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)}
+            },
+            upsert=True
+        )
+    except Exception as e:
+        log.warning("Failed to save tracked message to MongoDB: %s", e)
 
 
 async def _wipe_chat(chat_id: int):
-    """Delete all tracked messages for a chat."""
-    msg_ids = sorted(_tracked_messages.pop(chat_id, set()))
+    db = get_db()
+    doc = await db.autodelete.find_one({"chat_id": chat_id})
+    msg_ids = sorted(doc.get("msg_ids", [])) if doc else []
+
     if not msg_ids:
-        log.info("No tracked messages for chat %s, nothing to delete", chat_id)
+        log.info("No tracked messages for chat %s", chat_id)
+        await db.autodelete.delete_one({"chat_id": chat_id})
         return True
 
     log.info("Wiping chat %s: %d tracked messages: %s", chat_id, len(msg_ids), msg_ids)
@@ -64,61 +65,30 @@ async def _wipe_chat(chat_id: int):
         batch = msg_ids[i:i + 100]
         batch_deleted = False
 
-        # Try bot's high-level delete_messages (properly resolves peer + chat_id)
         if _bot and not batch_deleted:
             try:
                 count = await _bot.delete_messages(chat_id, batch)
-                log.info("Bot delete_messages for chat %s: result=%s (batch=%s)",
-                         chat_id, count, batch)
+                log.info("Bot delete_messages for chat %s: result=%s", chat_id, count)
                 deleted += len(batch)
                 batch_deleted = True
             except Exception as e:
                 log.warning("Bot delete_messages failed for chat %s: %s", chat_id, e)
 
-        # Fallback: try userbot
         if _userbot and not batch_deleted:
             try:
                 count = await _userbot.delete_messages(chat_id, batch, revoke=True)
-                log.info("Userbot delete_messages for chat %s: result=%s (batch=%s)",
-                         chat_id, count, batch)
+                log.info("Userbot delete_messages for chat %s: result=%s", chat_id, count)
                 deleted += len(batch)
                 batch_deleted = True
             except Exception as e:
                 log.warning("Userbot delete_messages failed for chat %s: %s", chat_id, e)
 
-        # Last resort: delete one by one via bot
-        if _bot and not batch_deleted:
-            for mid in batch:
-                try:
-                    await _bot.delete_messages(chat_id, mid)
-                    deleted += 1
-                except Exception as e:
-                    log.warning("Bot single delete failed for chat %s msg %s: %s", chat_id, mid, e)
-
-    log.info("Chat wipe done for %s: deleted %d messages (tracked %d)", chat_id, deleted, len(msg_ids))
-
-    # Also try to get and delete any untracked messages via userbot
-    if _userbot:
-        try:
-            remaining = []
-            async for msg in _userbot.get_chat_history(chat_id, limit=200):
-                remaining.append(msg.id)
-            if remaining:
-                log.info("Found %d untracked messages in chat %s, deleting", len(remaining), chat_id)
-                for i in range(0, len(remaining), 100):
-                    batch = remaining[i:i + 100]
-                    try:
-                        await _userbot.delete_messages(chat_id, batch, revoke=True)
-                    except Exception:
-                        pass
-        except Exception as e:
-            log.debug("Userbot cleanup for chat %s: %s", chat_id, e)
-
+    await db.autodelete.delete_one({"chat_id": chat_id})
+    log.info("Chat wipe complete for %s (deleted %d messages)", chat_id, deleted)
     return True
 
 
 async def _delayed_wipe(chat_id: int, delay_seconds: int):
-    """Wait for delay, then wipe the chat."""
     try:
         log.info("Timer started: chat %s will be wiped in %d seconds", chat_id, delay_seconds)
         await asyncio.sleep(delay_seconds)
@@ -132,29 +102,23 @@ async def _delayed_wipe(chat_id: int, delay_seconds: int):
         _active_timers.pop(chat_id, None)
 
 
-def _ensure_timer(chat_id: int):
-    """Ensure a wipe timer exists for this chat. Does NOT reset existing timers."""
+def _ensure_timer(chat_id: int, delay_seconds: int = WIPE_AFTER_MINUTES * 60):
     if chat_id in _active_timers:
         task = _active_timers[chat_id]
         if not task.done():
             return
         del _active_timers[chat_id]
 
-    delay = WIPE_AFTER_MINUTES * 60
-    task = asyncio.create_task(_delayed_wipe(chat_id, delay))
+    task = asyncio.create_task(_delayed_wipe(chat_id, delay_seconds))
     _active_timers[chat_id] = task
-    log.info("New wipe timer created for chat %s (%d min)", chat_id, WIPE_AFTER_MINUTES)
 
-
-# ── Middleware ────────────────────────────────────────────────────────────
 
 async def autodelete_message_middleware(client: Client, message):
-    """Fires on EVERY private message. Tracks it and ensures a timer is running."""
     try:
         from pyrogram.enums import ChatType
         if message.chat and message.chat.type == ChatType.PRIVATE:
             chat_id = message.chat.id
-            _track(chat_id, message.id)
+            await _track_db(chat_id, message.id)
             _ensure_timer(chat_id)
     except Exception as e:
         log.warning("Autodelete middleware error: %s", e)
@@ -162,70 +126,55 @@ async def autodelete_message_middleware(client: Client, message):
 
 
 async def autodelete_callback_middleware(client: Client, callback_query):
-    """Fires on EVERY callback query in private chats."""
     try:
         from pyrogram.enums import ChatType
         if callback_query.message and callback_query.message.chat.type == ChatType.PRIVATE:
             chat_id = callback_query.message.chat.id
-            _track(chat_id, callback_query.message.id)
+            await _track_db(chat_id, callback_query.message.id)
             _ensure_timer(chat_id)
     except Exception as e:
         log.warning("Autodelete callback middleware error: %s", e)
     await callback_query.continue_propagation()
 
 
-# ── Public API (used by plugins to track bot-sent messages) ──────────────
-
 async def track_message(chat_id: int, message_id: int, extra_data: dict = None, sender_type: str = "bot"):
-    """Track a message for auto-deletion."""
-    _track(chat_id, message_id)
+    await _track_db(chat_id, message_id)
+    _ensure_timer(chat_id)
 
 
 async def track_messages(chat_id: int, message_ids: list[int], extra_data: dict = None, sender_type: str = "bot"):
-    """Track multiple messages for auto-deletion."""
     for mid in message_ids:
-        _track(chat_id, mid)
+        await _track_db(chat_id, mid)
+    _ensure_timer(chat_id)
 
 
 async def schedule_chat_wipe(chat_id: int, delay_minutes: int = None):
-    """Ensure a timer is running for this chat."""
-    _ensure_timer(chat_id)
+    delay = (delay_minutes * 60) if delay_minutes else (WIPE_AFTER_MINUTES * 60)
+    _ensure_timer(chat_id, delay)
 
 
 async def cancel_chat_wipe(chat_id: int):
-    """Cancel any pending wipe timer."""
     task = _active_timers.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
-        log.info("Cancelled wipe timer for chat %s", chat_id)
 
 
 async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids: list = None, delete_user_messages: bool = False):
-    """Ensure a timer is running (does not reset)."""
     _ensure_timer(chat_id)
 
 
-async def delete_user_message(chat_id: int, message_id: int):
-    """Delete a single user message immediately."""
-    if _userbot:
-        try:
-            await _userbot.delete_messages(chat_id, message_id)
-        except Exception:
-            pass
-    elif _bot:
-        try:
-            await _bot.delete_messages(chat_id, message_id)
-        except Exception:
-            pass
-
-
-async def delete_all_user_messages(client: Client, chat_id: int):
-    """Immediately wipe all tracked messages."""
-    await _wipe_chat(chat_id)
-
-
 async def start_autodelete_loop(client: Client):
-    """No background loop needed — just register the bot client."""
     set_bot(client)
-    log.info("Auto-delete system ready (in-memory timers + message tracking, wipe after %dm)",
-             WIPE_AFTER_MINUTES)
+    db = get_db()
+    # Restore timers for pending chats from MongoDB
+    try:
+        pending_chats = await db.autodelete.find().to_list(length=1000)
+        for doc in pending_chats:
+            chat_id = doc.get("chat_id")
+            if chat_id:
+                _ensure_timer(chat_id)
+        log.info("Restored auto-delete timers for %d chats from MongoDB", len(pending_chats))
+    except Exception as e:
+        log.warning("Failed to restore autodelete timers from MongoDB: %s", e)
+
+    log.info("Auto-delete system ready (MongoDB persistence + timers, wipe after %dm)", WIPE_AFTER_MINUTES)
