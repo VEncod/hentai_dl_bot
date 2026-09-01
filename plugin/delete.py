@@ -2,8 +2,8 @@ import asyncio
 import logging
 import os
 import re
-from pyrogram import Client, filters
-from pyrogram.types import (
+from wzgram import Client, filters
+from wzgram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardButton,

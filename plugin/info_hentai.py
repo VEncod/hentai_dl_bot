@@ -3,8 +3,8 @@ import logging
 import os
 import traceback
 
-from pyrogram import Client
-from pyrogram.types import (
+from wzgram import Client
+from wzgram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,

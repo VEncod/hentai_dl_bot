@@ -6,7 +6,7 @@ Supports creating a message and returning an updater function for progress edits
 """
 
 import logging
-from pyrogram import Client
+from wzgram import Client
 
 from utils.db import get_db
 

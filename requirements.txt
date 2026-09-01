@@ -1,5 +1,4 @@
-pyrofork>=2.3.0
-TgCrypto-pyrofork
+wzgram>=3.0.0
 pymongo[srv]
 dnspython
 aiohttp>=3.9.0

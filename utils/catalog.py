@@ -14,8 +14,8 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from pyrogram import Client
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from wzgram import Client
+from wzgram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from utils.db import get_db
 from utils.logger import get_main_channel

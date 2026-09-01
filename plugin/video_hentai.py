@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
-from pyrogram import Client
-from pyrogram.types import (
+from wzgram import Client
+from wzgram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,

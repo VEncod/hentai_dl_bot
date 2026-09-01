@@ -6,10 +6,10 @@ import logging
 import time as _time
 from functools import wraps
 
-from pyrogram import Client
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from pyrogram.enums import ChatMemberStatus
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelPrivate
+from wzgram import Client
+from wzgram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from wzgram.enums import ChatMemberStatus
+from wzgram.errors import UserNotParticipant, ChatAdminRequired, ChannelPrivate
 
 from utils.db import get_db
 

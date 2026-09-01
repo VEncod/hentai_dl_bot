@@ -10,8 +10,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pyrogram import Client
-from pyrogram.types import (
+from wzgram import Client
+from wzgram.types import (
     Message,
     InlineKeyboardButton,
     InlineKeyboardMarkup,

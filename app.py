@@ -10,9 +10,9 @@ try:
 except ImportError:
     pass
 
-from pyrogram import Client, filters, idle
-from pyrogram.types import BotCommand
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from wzgram import Client, filters, idle, errors
+from wzgram.types import BotCommand
+from wzgram.handlers import MessageHandler, CallbackQueryHandler
 
 from utils.db import init_db
 
@@ -34,7 +34,7 @@ from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
 from utils.autodelete import start_autodelete_loop, set_userbot, autodelete_message_middleware, autodelete_callback_middleware
-from utils.session_store import load_session_string, save_session_string
+from utils.session_store import load_session_string, save_session_string, delete_session_string
 
 # ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -97,15 +97,23 @@ async def main():
 
     # Initialize userbot if session string is available
     global userbot
-    if SESSION_STRING:
-        userbot = Client(
-            "hentai_userbot",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            session_string=SESSION_STRING,
-            plugins=None,
-        )
-        log.info("Userbot session configured — full chat wipe enabled")
+    if SESSION_STRING and SESSION_STRING.strip():
+        try:
+            userbot = Client(
+                "hentai_userbot",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                session_string=SESSION_STRING.strip(),
+                plugins=None,
+                no_updates=True,
+            )
+            log.info("Userbot session configured — full chat wipe enabled")
+        except Exception as e:
+            log.warning("Invalid session string (%s: %s). Falling back to normal bot mode.", type(e).__name__, e)
+            await delete_session_string()
+            userbot = None
+    else:
+        log.info("No SESSION_STRING provided — running in normal bot mode")
 
     # ── Auto-delete middleware (runs BEFORE all handlers on every private interaction) ──
     bot.add_handler(MessageHandler(autodelete_message_middleware, filters.private), group=-1)
@@ -166,15 +174,30 @@ async def main():
     # Set bot commands visible in Telegram menu
     await bot.start()
 
-    # Start userbot if configured
+    # Start userbot if configured (with fallback to normal bot mode if session revoked/invalid)
     if userbot:
         try:
             await userbot.start()
             set_userbot(userbot)
-            log.info("Userbot started — user message deletion enabled")
-        except Exception as e:
-            log.warning("Userbot start failed (%s) — continuing with main bot only", e)
+            log.info("Userbot started successfully — user message deletion enabled")
+        except (errors.Unauthorized, errors.AuthKeyUnregistered, errors.SessionRevoked, errors.SessionExpired, errors.UserDeactivated) as e:
+            log.warning(
+                "Userbot session was terminated or revoked by Telegram (%s: %s). "
+                "Falling back to normal bot mode. (Run gen_session.py to create a new session string)",
+                type(e).__name__, e
+            )
+            await delete_session_string()
             userbot = None
+            set_userbot(None)
+        except Exception as e:
+            log.warning(
+                "Failed to start userbot (%s: %s). Falling back to normal bot mode.",
+                type(e).__name__, e
+            )
+            if any(kw in type(e).__name__ for kw in ("AuthKey", "Session", "Key", "Unauthorized", "UserDeactivated")):
+                await delete_session_string()
+            userbot = None
+            set_userbot(None)
 
     await bot.set_bot_commands([
         BotCommand("start", "Start the bot"),
@@ -202,7 +225,11 @@ async def main():
     await idle()
     await bot.stop()
     if userbot:
-        await userbot.stop()
+        try:
+            if getattr(userbot, "is_connected", False):
+                await userbot.stop()
+        except Exception as e:
+            log.warning("Error stopping userbot: %s", e)
     log.info("Bot stopped.")
 
 

@@ -9,8 +9,8 @@ Commands:
 import asyncio
 import logging
 
-from pyrogram import Client
-from pyrogram.types import Message
+from wzgram import Client
+from wzgram.types import Message
 
 from utils.db import get_db
 from utils.auth import admin_only

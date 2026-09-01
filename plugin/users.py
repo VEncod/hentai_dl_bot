@@ -19,8 +19,8 @@ Callback queries:
 import logging
 from datetime import datetime, timezone
 
-from pyrogram import Client
-from pyrogram.types import (
+from wzgram import Client
+from wzgram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardButton,

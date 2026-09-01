@@ -280,7 +280,7 @@ Both engines are automatically installed during setup. N_m3u8DL-RE is bundled in
 
 ## 🧰 Tech Stack
 
-- **[Pyrofork](https://github.com/Mayuri-Chan/pyrofork)** — Modern async Pyrogram fork for Telegram Bot API
+- **[WZGram](https://github.com/rjriajul/wzgram)** — High-performance async Telegram MTProto framework (active Pyrogram fork)
 - **[Motor](https://motor.readthedocs.io/)** — Async MongoDB driver
 - **[aiohttp](https://aiohttp.readthedocs.io/)** — Async HTTP client
 - **[N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE)** — HLS stream downloader

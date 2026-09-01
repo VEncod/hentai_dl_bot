@@ -18,7 +18,7 @@ Works with both Message and CallbackQuery handlers.
 import logging
 from functools import wraps
 
-from pyrogram.types import Message, CallbackQuery
+from wzgram.types import Message, CallbackQuery
 
 from utils.db import get_db
 

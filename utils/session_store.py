@@ -38,3 +38,14 @@ async def save_session_string(session_string: str):
         log.info("Session string saved to database")
     except Exception as e:
         log.warning("Failed to save session string to DB: %s", e)
+
+
+async def delete_session_string():
+    """Delete session string from MongoDB config (e.g. when session is revoked/expired)."""
+    try:
+        db = get_db()
+        await db.config.delete_one({"key": SESSION_KEY})
+        log.info("Invalid/terminated session string removed from database")
+    except Exception as e:
+        log.warning("Failed to delete session string from DB: %s", e)
+

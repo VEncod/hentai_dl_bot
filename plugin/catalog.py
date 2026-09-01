@@ -10,8 +10,8 @@ Callback data format: cat_<series_slug>
 import asyncio
 import logging
 
-from pyrogram import Client
-from pyrogram.types import CallbackQuery
+from wzgram import Client
+from wzgram.types import CallbackQuery
 
 from utils.catalog import get_catalog_episodes
 from utils.db import get_db

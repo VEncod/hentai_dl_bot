@@ -9,7 +9,7 @@ Features:
 import asyncio
 import logging
 from datetime import datetime, timezone
-from pyrogram import Client
+from wzgram import Client
 from utils.db import get_db
 
 log = logging.getLogger(__name__)
@@ -27,10 +27,35 @@ def set_bot(client: Client):
     log.info("Bot client registered for auto-delete")
 
 
-def set_userbot(client: Client):
+def set_userbot(client: Client | None):
+    """Register or unregister the userbot client for user message deletion."""
     global _userbot
     _userbot = client
-    log.info("Userbot registered for auto-delete")
+    if client:
+        log.info("Userbot registered for auto-delete")
+    else:
+        log.info("Userbot unregistered / disabled for auto-delete")
+
+
+async def _handle_userbot_error(e: Exception):
+    """Check if exception was caused by session revocation / termination."""
+    global _userbot
+    error_name = type(e).__name__
+    is_auth_error = any(
+        kw in error_name for kw in ("AuthKey", "SessionRevoked", "SessionExpired", "Unauthorized", "UserDeactivated")
+    )
+    if is_auth_error:
+        log.warning(
+            "Userbot session was terminated or revoked by Telegram (%s: %s). Falling back to normal bot mode.",
+            error_name, e
+        )
+        _userbot = None
+        try:
+            from utils.session_store import delete_session_string
+            await delete_session_string()
+        except Exception:
+            pass
+
 
 
 async def _track_db(chat_id: int, message_id: int):
@@ -81,10 +106,38 @@ async def _wipe_chat(chat_id: int):
                 deleted += len(batch)
                 batch_deleted = True
             except Exception as e:
+                await _handle_userbot_error(e)
                 log.warning("Userbot delete_messages failed for chat %s: %s", chat_id, e)
 
+        # Last resort: delete one by one via bot
+        if _bot and not batch_deleted:
+            for mid in batch:
+                try:
+                    await _bot.delete_messages(chat_id, mid)
+                    deleted += 1
+                except Exception as e:
+                    log.warning("Bot single delete failed for chat %s msg %s: %s", chat_id, mid, e)
+
+    # Also try to get and delete any untracked messages via userbot
+    if _userbot:
+        try:
+            remaining = []
+            async for msg in _userbot.get_chat_history(chat_id, limit=200):
+                remaining.append(msg.id)
+            if remaining:
+                log.info("Found %d untracked messages in chat %s, deleting", len(remaining), chat_id)
+                for i in range(0, len(remaining), 100):
+                    batch = remaining[i:i + 100]
+                    try:
+                        await _userbot.delete_messages(chat_id, batch, revoke=True)
+                    except Exception as e:
+                        await _handle_userbot_error(e)
+        except Exception as e:
+            await _handle_userbot_error(e)
+            log.debug("Userbot cleanup for chat %s: %s", chat_id, e)
+
     await db.autodelete.delete_one({"chat_id": chat_id})
-    log.info("Chat wipe complete for %s (deleted %d messages)", chat_id, deleted)
+    log.info("Chat wipe complete for %s: deleted %d messages (tracked %d)", chat_id, deleted, len(msg_ids))
     return True
 
 
@@ -115,7 +168,7 @@ def _ensure_timer(chat_id: int, delay_seconds: int = WIPE_AFTER_MINUTES * 60):
 
 async def autodelete_message_middleware(client: Client, message):
     try:
-        from pyrogram.enums import ChatType
+        from wzgram.enums import ChatType
         if message.chat and message.chat.type == ChatType.PRIVATE:
             chat_id = message.chat.id
             await _track_db(chat_id, message.id)
@@ -127,7 +180,7 @@ async def autodelete_message_middleware(client: Client, message):
 
 async def autodelete_callback_middleware(client: Client, callback_query):
     try:
-        from pyrogram.enums import ChatType
+        from wzgram.enums import ChatType
         if callback_query.message and callback_query.message.chat.type == ChatType.PRIVATE:
             chat_id = callback_query.message.chat.id
             await _track_db(chat_id, callback_query.message.id)
@@ -163,6 +216,25 @@ async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids:
     _ensure_timer(chat_id)
 
 
+async def delete_user_message(chat_id: int, message_id: int):
+    """Delete a single user message immediately."""
+    deleted = False
+    if _userbot:
+        try:
+            await _userbot.delete_messages(chat_id, message_id)
+            deleted = True
+        except Exception as e:
+            await _handle_userbot_error(e)
+    if not deleted and _bot:
+        try:
+            await _bot.delete_messages(chat_id, message_id)
+        except Exception:
+            pass
+
+
+async def delete_all_user_messages(client: Client, chat_id: int):
+    """Immediately wipe all tracked messages."""
+    await _wipe_chat(chat_id)
 async def start_autodelete_loop(client: Client):
     set_bot(client)
     db = get_db()
