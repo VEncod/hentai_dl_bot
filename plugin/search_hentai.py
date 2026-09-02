@@ -103,26 +103,49 @@ async def hentaisearch(client: Client, message: Message):
         status_text = f"🔎 **Searching for:** `{query}`...\n⏳ *Searching Hentai.tv and Oppai.stream...*"
 
     # 1. Send instant UI progress indicator
-    status_msg = await message.reply_text(
-        status_text,
-        reply_markup=reply_kb,
-    )
-    await track_message(chat_id, status_msg.id)
+    status_msg = None
+    try:
+        status_msg = await message.reply_text(
+            status_text,
+            reply_markup=reply_kb,
+        )
+        await track_message(chat_id, status_msg.id)
+    except Exception as e:
+        log.warning("Failed to send initial search status: %s", e)
 
     try:
         results = await asyncio.to_thread(hanime_api.search, query, 0, source_pref)
     except Exception:
         log.exception("Search failed for query=%s source=%s", query, source_pref)
-        await status_msg.edit_text("❌ Search API is currently unavailable. Please try again later.")
+        if status_msg:
+            try:
+                await status_msg.edit_text("❌ Search API is currently unavailable. Please try again later.")
+            except Exception:
+                pass
         return
 
     if not results:
-        await status_msg.edit_text(
+        no_res_text = (
             f"🔍 **Search Query:** `{query}`\n"
             f"🌐 **Source:** {source_label}\n\n"
             f"❌ **No results found.**\n"
-            f"💡 *Tip: Try searching with a shorter keyword (e.g. 'Overflow' or 'Liliana'), or switch search source using the keyboard below.*",
+            f"💡 *Tip: Try searching with a shorter keyword (e.g. 'Overflow' or 'Liliana'), or switch search source using the keyboard below.*"
         )
+        if status_msg:
+            try:
+                await status_msg.edit_text(no_res_text)
+            except Exception:
+                try:
+                    sent = await client.send_message(chat_id, no_res_text, reply_markup=reply_kb)
+                    await track_message(chat_id, sent.id)
+                except Exception:
+                    pass
+        else:
+            try:
+                sent = await client.send_message(chat_id, no_res_text, reply_markup=reply_kb)
+                await track_message(chat_id, sent.id)
+            except Exception:
+                pass
         return
 
     keyboard = []
@@ -133,9 +156,26 @@ async def hentaisearch(client: Client, message: Message):
         display_name = name if len(name) <= 55 else name[:52] + "..."
         keyboard.append([InlineKeyboardButton(f"🎬 {display_name}", callback_data=f"info_{short_key}")])
 
-    await status_msg.edit_text(
-        f"🔍 **Search Results for:** **{query}** ({len(results)} found)\n"
+    res_text = (
+        f"🔍 **Search Results for:** `{query}` ({len(results)} found)\n"
         f"🌐 **Source:** {source_label}\n\n"
-        f"👇 *Tap a title below to view details & download options:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        f"👇 *Tap a title below to view details & download options:*"
     )
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if status_msg:
+        try:
+            await status_msg.edit_text(res_text, reply_markup=markup)
+        except Exception as e:
+            log.warning("status_msg.edit_text failed (%s), sending fresh message", e)
+            try:
+                sent = await client.send_message(chat_id, res_text, reply_markup=markup)
+                await track_message(chat_id, sent.id)
+            except Exception:
+                log.exception("send_message fallback failed in hentaisearch")
+    else:
+        try:
+            sent = await client.send_message(chat_id, res_text, reply_markup=markup)
+            await track_message(chat_id, sent.id)
+        except Exception:
+            log.exception("send_message failed in hentaisearch")
