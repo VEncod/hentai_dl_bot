@@ -101,7 +101,7 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     if len(tags) > 10:
         tags_str += f" (+{len(tags) - 10} more)"
 
-    brand = info.get("brand") or "HentaiHaven"
+    brand = info.get("brand") or "hentai.tv / oppai.stream"
     text = (
         f"**{name}**\n\n"
         f"🌐 **Source:** {brand}\n"

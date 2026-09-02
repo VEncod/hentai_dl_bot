@@ -40,7 +40,7 @@ async def hentaisearch(client: Client, message: Message):
     # 1. Send instant UI progress indicator
     status_msg = await message.reply_text(
         f"🔎 **Searching for:** `{query}`...\n"
-        f"⏳ *Fetching titles from multi-provider engine...*"
+        f"⏳ *Searching hentai.tv and oppai.stream...*"
     )
     await track_message(message.chat.id, status_msg.id)
 

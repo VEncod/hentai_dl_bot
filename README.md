@@ -8,8 +8,8 @@ A powerful Telegram bot to search, stream, and download hentai videos directly t
 
 ## ✨ Features
 
-- 🔍 **Search** — Find hentai by name via Hanime.tv API
-- 📺 **Stream Links** — Get direct streaming URLs in multiple qualities
+- 🔍 **Search** — Find hentai by name on hentai.tv and oppai.stream
+- 📺 **Stream Links** — Resolve direct streaming URLs with 4K preferred when available
 - ⬇️ **Download** — Download videos and receive them as Telegram documents
 - 💾 **Smart Caching** — Previously downloaded files are served instantly from cache
 - 📂 **Archive System** — Browse downloaded episodes by series
@@ -47,6 +47,9 @@ A powerful Telegram bot to search, stream, and download hentai videos directly t
 | `/revoke <user_id>` | Revoke an approved user's access |
 | `/adduser <user_id>` | Directly approve a user without request |
 | `/removeuser <user_id>` | Remove an approved user |
+| `/oppai_login <username> <password>` | Log the shared bot session into Oppai.stream (private chat) |
+| `/oppai_logout` | Remove the saved Oppai.stream session |
+| `/oppai_status` | Check the Oppai.stream session status |
 | `/users` | List all approved users |
 | `/pending` | View pending access requests with inline buttons |
 | `/broadcast <message>` | Send a message to all approved users |

@@ -1,304 +1,320 @@
-"""
-HentaiHaven Multi-Source API Wrapper.
+"""Scrapers for the bot's supported content sources.
 
-100% Native Integration with HentaiHaven (hentaihaven.xxx).
-Provides:
-- Search on hentaihaven.xxx
-- Details, metadata, posters, episodes on hentaihaven.xxx
-- Direct decrypted HLS (.m3u8) / MP4 stream extraction from hentaihaven.xxx player logic
+The public class name is kept for compatibility with the existing plugins.
+Results carry a source prefix in their slug because the two sites use
+different identifiers and can contain the same title.
 """
 
 import base64
-import codecs
-import json
+import html
 import logging
-import os
 import re
-from urllib.parse import quote
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
 
-HENTAIHAVEN_BASE = "https://hentaihaven.xxx"
-BASE_URL = HENTAIHAVEN_BASE
+HENTAI_TV_BASE = "https://hentai.tv"
+OPPAI_BASE = "https://oppai.stream"
+BASE_URL = OPPAI_BASE
+
+SOURCE_PREFIXES = {
+    "htv": "hentai.tv",
+    "oppai": "oppai.stream",
+}
+
+
+def _prefixed(source: str, value: str) -> str:
+    return f"{source}__{value}"
+
+
+def _split_slug(slug: str) -> tuple[str, str]:
+    for prefix in SOURCE_PREFIXES:
+        marker = f"{prefix}__"
+        if slug.startswith(marker):
+            return prefix, slug[len(marker):]
+    return "oppai", slug
+
+
+def _absolute(base: str, value: str) -> str:
+    return urljoin(base + "/", html.unescape(value or ""))
+
+
+def _int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class HanimeAPI:
-    """Native HentaiHaven (hentaihaven.xxx) API & Scraper Provider."""
+    """Search and resolve videos from hentai.tv and oppai.stream."""
+
+    _shared_session = requests.Session()
+    _session_loaded = False
 
     def __init__(self):
-        self.session = requests.Session()
+        self.session = self._shared_session
         self.session.headers.update({
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0.0.0 Safari/537.36'
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
             ),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Origin': HENTAIHAVEN_BASE,
-            'Referer': HENTAIHAVEN_BASE + '/',
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         })
 
+    @classmethod
+    async def load_saved_session(cls) -> None:
+        """Load the bot-wide Oppai cookie jar after MongoDB is initialized."""
+        if cls._session_loaded:
+            return
+        from utils.db import get_db
+
+        saved = await get_db().oppai_auth.find_one({"_id": "session"})
+        if saved and saved.get("cookies"):
+            cls._shared_session.cookies.update(saved["cookies"])
+            log.info("Loaded saved Oppai session")
+        cls._session_loaded = True
+
+    def login_oppai(self, username: str, password: str) -> tuple[bool, str, dict]:
+        """Log in to Oppai and return success, message, and serializable cookies."""
+        response = self.session.post(
+            f"{OPPAI_BASE}/actions/auth.php?a=l",
+            data={"username": username, "password": password},
+            headers={"Referer": f"{OPPAI_BASE}/auth.php?a=login"},
+            timeout=20,
+            allow_redirects=True,
+        )
+        page = BeautifulSoup(response.text, "html.parser")
+        text = page.get_text(" ", strip=True).lower()
+        failed = any(term in text for term in ("incorrect", "invalid", "wrong password", "login failed"))
+        success = response.url.rstrip("/") != f"{OPPAI_BASE}/auth.php?a=login" and not failed
+        cookies = self.session.cookies.get_dict(domain="oppai.stream")
+        if success and cookies:
+            return True, "Oppai login successful.", cookies
+        return False, "Oppai rejected the login. Cloudflare verification or invalid credentials may be required.", {}
+
+    def logout_oppai(self) -> None:
+        self.session.cookies.clear()
+
+    def oppai_logged_in(self) -> bool:
+        return bool(self.session.cookies.get_dict(domain="oppai.stream"))
+
     def search(self, query: str, page: int = 0) -> list[dict]:
-        """Search videos on HentaiHaven."""
-        log.info(f"Searching HentaiHaven for '{query}' (page={page})")
-        return self._search_hentaihaven(query, page)
+        """Search both configured sources and return a common result shape."""
+        results = []
+        for source, searcher in (("htv", self._search_hentai_tv), ("oppai", self._search_oppai)):
+            try:
+                results.extend(searcher(query, page))
+            except Exception:
+                log.exception("%s search failed for %r", SOURCE_PREFIXES[source], query)
+
+        # Prefer exact title matches and remove duplicate source records.
+        query_tokens = {token for token in re.findall(r"\w+", query.lower()) if len(token) > 1}
+        exact = [item for item in results if item["title"].lower() == query.lower()]
+        if exact:
+            results = exact + [item for item in results if item not in exact]
+        elif query_tokens:
+            relevant = [
+                item for item in results
+                if any(token in item["title"].lower() or token in item["slug"].lower() for token in query_tokens)
+            ]
+            if relevant:
+                results = relevant
+        return results[:40]
 
     def details(self, slug: str) -> dict:
-        """Fetch video details & native decrypted streams from HentaiHaven."""
-        log.info(f"Fetching HentaiHaven details for '{slug}'")
-        return self._details_hentaihaven(slug)
+        source, raw_slug = _split_slug(slug)
+        if source == "htv":
+            return self._hentai_tv_details(raw_slug)
+        return self._oppai_details(raw_slug)
 
     def get_streams(self, slug: str) -> dict:
-        """Get streaming & direct download URLs for a video from HentaiHaven."""
         info = self.details(slug)
-        streams = info.get('streams', [])
-
-        best = None
-        for s in streams:
-            if not best:
-                best = s
-            elif s.get('kind') == 'mp4':
-                best = s
-            elif int(s.get('height', 0) or 0) > int(best.get('height', 0) or 0):
-                best = s
-
-        dl_url = best.get('url', '') if best else ''
-        log.info(f"Sources for {slug}: dl_url={dl_url[:60] if dl_url else 'NONE'}, streams={len(streams)}")
+        streams = info.get("streams", [])
+        # The source sites expose 4k, 1080p, and 720p independently. Keep
+        # quality preference deterministic and fall back when 4k is absent.
+        quality_order = {"4k": 0, "2160": 0, "1080": 1, "720": 2}
+        streams = sorted(
+            streams,
+            key=lambda item: (quality_order.get(str(item.get("height", "")).lower(), 3),
+                              -_int(item.get("height"))),
+        )
+        dl_url = streams[0].get("url", "") if streams else ""
         return {
-            'streams': streams,
-            'dl_url': dl_url,
-            'sources': [
-                {'url': s['url'], 'label': f"{s.get('height', 720)}p", 'type': s.get('extension', '')}
-                for s in streams if s.get('url')
+            "streams": streams,
+            "dl_url": dl_url,
+            "sources": [
+                {
+                    "url": item["url"],
+                    "label": item.get("label", f"{item.get('height', 720)}p"),
+                    "type": item.get("extension", ""),
+                }
+                for item in streams if item.get("url")
             ],
         }
 
-    # ── HentaiHaven Scraper Engine ─────────────────────────────────────
-
-    def _search_hentaihaven(self, query: str, page: int = 0) -> list[dict]:
+    def _search_hentai_tv(self, query: str, page: int = 0) -> list[dict]:
+        response = self.session.get(
+            f"{HENTAI_TV_BASE}/api/search",
+            params={"q": query, "limit": 40},
+            timeout=15,
+        )
+        response.raise_for_status()
         results = []
-        try:
-            url = f"{HENTAIHAVEN_BASE}/?s={quote(query)}"
-            resp = self.session.get(url, timeout=10)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    if "/watch/" in href and not re.search(r"/episode-\d+", href) and not re.search(r"/season-\d+", href):
-                        slug_match = re.search(r"/watch/([^/]+)", href)
-                        if slug_match:
-                            slug = slug_match.group(1).strip("/")
-                            img = a.find("img")
-                            cover = (img.get("src") or img.get("data-src") or "") if img else ""
-                            
-                            title = ""
-                            if img and img.get("alt"):
-                                title = img.get("alt").strip()
-                            if not title and a.get("title"):
-                                title = a.get("title").strip()
-                            if not title:
-                                title = a.text.strip()
-
-                            title = re.sub(r"^(HD)?\s*\d{1,2}:\d{2}\s*", "", title, flags=re.IGNORECASE)
-                            title = re.sub(r"\s*cover$", "", title, flags=re.IGNORECASE).strip()
-                            title = re.sub(r"\s*Hentai\s*$", "", title, flags=re.IGNORECASE).strip()
-
-                            full_url = href if href.startswith("http") else f"{HENTAIHAVEN_BASE}{href}"
-
-                            if title and slug and not any(item["slug"] == slug for item in results):
-                                results.append({
-                                    'id':          slug,
-                                    'slug':        slug,
-                                    'name':        title,
-                                    'title':       title,
-                                    'cover_url':   cover,
-                                    'poster_url':  cover,
-                                    'cover':       cover,
-                                    'tags':        [],
-                                    'views':       0,
-                                    'brand':       "HentaiHaven",
-                                    'description': f"Watch {title} on HentaiHaven",
-                                    'url':         full_url,
-                                })
-        except Exception as e:
-            log.error(f"HentaiHaven search failed for '{query}': {e}")
-
-        # Filter results for keyword relevance
-        tokens = [re.sub(r"[^\w]", "", t.lower()) for t in query.split()]
-        keywords = [t for t in tokens if len(t) >= 2 and t not in {"a", "an", "the", "in", "on", "at", "to", "for", "of", "with", "by", "from", "no", "and", "or", "is", "ep", "episode", "san"}]
-        if keywords:
-            matched = [
-                item for item in results
-                if any(kw in item["title"].lower() or kw in item["slug"].lower() for kw in keywords)
-            ]
-            if matched:
-                results = matched
-
-        log.info(f"HentaiHaven search returned {len(results)} items for '{query}'")
+        for video in response.json().get("videos", []):
+            raw_slug = video.get("slug")
+            if not raw_slug:
+                continue
+            cover = _absolute(HENTAI_TV_BASE, video.get("cover") or video.get("featureImage") or video.get("thumb"))
+            slug = _prefixed("htv", raw_slug)
+            results.append({
+                "id": slug, "slug": slug,
+                "name": video.get("title") or raw_slug,
+                "title": video.get("title") or raw_slug,
+                "cover_url": cover, "poster_url": cover, "cover": cover,
+                "tags": video.get("tags", []), "views": video.get("views", 0),
+                "brand": video.get("brand", "hentai.tv"),
+                "description": video.get("description", ""),
+                "url": f"{HENTAI_TV_BASE}/watch/{raw_slug}",
+            })
         return results
 
-    def _details_hentaihaven(self, slug: str) -> dict:
-        main_url = f"{HENTAIHAVEN_BASE}/watch/{slug}/"
-        resp = self.session.get(main_url, timeout=8)
+    def _search_oppai(self, query: str, page: int = 0) -> list[dict]:
+        response = self.session.get(
+            f"{OPPAI_BASE}/actions/search.php",
+            params={"text": query, "order": "recent", "page": page + 1, "limit": 40,
+                    "genres": "", "blacklist": "", "studio": "", "ibt": 0, "swa": 0},
+            timeout=15,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        results = []
+        for card in soup.select(".episode-shown"):
+            link = card.select_one("a[href*='/watch?e=']")
+            if not link:
+                continue
+            raw_url = _absolute(OPPAI_BASE, link.get("href"))
+            raw_slug = parse_qs(urlparse(raw_url).query).get("e", [""])[0]
+            if not raw_slug:
+                continue
+            title_node = card.select_one("font.title")
+            title = title_node.get_text(" ", strip=True) if title_node else card.get("name", raw_slug)
+            cover_node = card.select_one("img.cover-img-in")
+            cover = _absolute(OPPAI_BASE, cover_node.get("original") or cover_node.get("src")) if cover_node else ""
+            tags = [tag.get_text(" ", strip=True) for tag in card.select(".tags-video .fh-tag")]
+            tags.extend(x.strip() for x in (card.get("tags") or "").split(",") if x.strip() and x.strip() not in tags)
+            slug = _prefixed("oppai", raw_slug)
+            results.append({
+                "id": slug, "slug": slug, "name": title, "title": title,
+                "cover_url": cover, "poster_url": cover, "cover": cover,
+                "tags": tags, "views": 0, "brand": "oppai.stream",
+                "description": card.get("desc", ""), "url": raw_url,
+            })
+        return results
 
-        if resp.status_code != 200:
-            main_url = f"{HENTAIHAVEN_BASE}/watch/{slug}/episode-1"
-            resp = self.session.get(main_url, timeout=8)
-
-        if resp.status_code != 200:
-            log.error(f"Failed to fetch HentaiHaven page for {slug} (HTTP {resp.status_code})")
-            return {
-                'id': slug, 'slug': slug, 'name': slug.replace("-", " ").title(),
-                'title': slug.replace("-", " ").title(), 'description': '',
-                'summary': '', 'poster_url': '', 'cover_url': '', 'poster': '',
-                'cover': '', 'tags': [], 'genres': [], 'brand': 'HentaiHaven', 'views': 0,
-                'likes': 0, 'streams': [], 'episodes': [], 'totalEpisodes': 0, 'url': main_url,
-                'dl_url': ''
-            }
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        title_el = soup.select_one("h1") or soup.select_one(".entry-title")
-        title = title_el.text.strip() if title_el else slug.replace("-", " ").title()
-        title = re.sub(r"\s*-\s*Episode\s*\d+.*$", "", title, flags=re.IGNORECASE).strip()
-        title = re.sub(r"\s*Hentai\s*$", "", title, flags=re.IGNORECASE).strip()
-
-        desc_el = soup.select_one(".entry-content") or soup.select_one("meta[name=\"description\"]")
-        desc = desc_el.get("content", "") if desc_el and desc_el.name == "meta" else (desc_el.text.strip() if desc_el else f"Watch {title} on HentaiHaven")
-
-        poster = ""
-        m_img = soup.select_one("meta[property=\"og:image\"]")
-        if m_img:
-            poster = m_img.get("content", "")
-
-        tags = [a.text.strip() for a in soup.select("a[href*=\"/series/\"]") if a.text.strip()]
-
+    def _hentai_tv_details(self, raw_slug: str) -> dict:
+        response = self.session.get(
+            f"{HENTAI_TV_BASE}/api/search",
+            params={"q": raw_slug.rsplit("-episode-", 1)[0], "limit": 40},
+            timeout=15,
+        )
+        response.raise_for_status()
+        videos = response.json().get("videos", [])
+        video = next((item for item in videos if item.get("slug") == raw_slug), videos[0] if videos else {})
+        if not video:
+            return self._empty_details(_prefixed("htv", raw_slug), "hentai.tv")
+        cover = _absolute(HENTAI_TV_BASE, video.get("cover") or video.get("featureImage") or video.get("thumb"))
+        slug = _prefixed("htv", raw_slug)
+        series_videos = [item for item in videos if item.get("titleId") == video.get("titleId")]
         episodes = []
-        ep_urls_to_try = []
-
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if f"/watch/{slug}/" in href and ("episode-" in href or "season-" in href):
-                ep_match = re.search(r"episode-(\d+)", href)
-                ep_num = ep_match.group(1) if ep_match else "1"
-                ep_slug = f"{slug}-episode-{ep_num}" if ep_num != "1" else slug
-                
-                full_ep_url = href if href.startswith("http") else f"{HENTAIHAVEN_BASE}{href}"
-                if full_ep_url not in ep_urls_to_try:
-                    ep_urls_to_try.append(full_ep_url)
-
-                if not any(e["slug"] == ep_slug for e in episodes):
-                    episodes.append({
-                        "id": ep_slug,
-                        "slug": ep_slug,
-                        "name": f"Episode {ep_num}",
-                        "title": f"Episode {ep_num}",
-                        "url": full_ep_url
-                    })
-
-        # Sort episodes by episode number ascending
-        episodes.sort(key=lambda x: int(re.search(r"\d+", x["name"]).group(0)) if re.search(r"\d+", x["name"]) else 1)
-
+        for item in sorted(series_videos, key=lambda entry: _int(entry.get("ep"), 0)):
+            episode_slug = _prefixed("htv", item.get("slug", ""))
+            episodes.append({
+                "id": episode_slug,
+                "slug": episode_slug,
+                "name": f"Episode {item.get('ep', 1)}",
+                "title": f"Episode {item.get('ep', 1)}",
+                "url": f"{HENTAI_TV_BASE}/watch/{item.get('slug', '')}",
+            })
         if not episodes:
-            episodes = [{"id": slug, "slug": slug, "name": title, "title": title, "url": main_url}]
-
-        # Find iframe for video stream (check main page first, then episode 1 page)
-        iframe = soup.find("iframe", src=True)
-        active_ep_url = main_url
-
-        if not iframe:
-            target_ep_url = f"{HENTAIHAVEN_BASE}/watch/{slug}/episode-1"
-            if ep_urls_to_try:
-                target_ep_url = ep_urls_to_try[-1]  # episode-1 is usually last in descending list
-
-            resp_ep = self.session.get(target_ep_url, timeout=8)
-            if resp_ep.status_code == 200:
-                soup_ep = BeautifulSoup(resp_ep.text, "html.parser")
-                iframe = soup_ep.find("iframe", src=True)
-                active_ep_url = target_ep_url
-
-        streams = []
-        if iframe:
-            player_url = iframe["src"]
-            if player_url.startswith("//"):
-                player_url = "https:" + player_url
-
-            try:
-                p_headers = {
-                    'User-Agent': self.session.headers['User-Agent'],
-                    'Referer': active_ep_url,
-                    'Origin': HENTAIHAVEN_BASE,
-                }
-                r_p = self.session.get(player_url, headers=p_headers, timeout=8)
-                soup_p = BeautifulSoup(r_p.text, "html.parser")
-                meta = soup_p.find("meta", attrs={"name": "x-secure-token"})
-                if meta:
-                    token = meta["content"].replace("sha512-", "")
-
-                    # Decrypt token via ROT13 + Base64
-                    step1 = codecs.encode(token, "rot13")
-                    step1_dec = base64.b64decode(step1).decode("utf-8")
-                    step2 = codecs.encode(step1_dec, "rot13")
-                    step2_dec = base64.b64decode(step2).decode("utf-8")
-                    step3 = codecs.encode(step2_dec, "rot13")
-                    step3_dec = base64.b64decode(step3).decode("utf-8")
-
-                    config = json.loads(step3_dec)
-                    en = config.get("en")
-                    iv = config.get("iv")
-
-                    if en and iv:
-                        api_url = f"{HENTAIHAVEN_BASE}/wp-content/plugins/player-logic/api.php"
-                        api_headers = {
-                            'User-Agent': self.session.headers['User-Agent'],
-                            'Origin': HENTAIHAVEN_BASE,
-                            'Referer': player_url
-                        }
-                        data = {
-                            "action": "zarat_get_data_player_ajax",
-                            "a": en,
-                            "b": iv
-                        }
-                        r_api = self.session.post(api_url, data=data, headers=api_headers, timeout=8)
-                        res_json = r_api.json()
-                        if res_json.get("status") and res_json.get("data", {}).get("sources"):
-                            for src in res_json["data"]["sources"]:
-                                s_url = src.get("src")
-                                if s_url:
-                                    streams.append({
-                                        "url": s_url,
-                                        "height": 720,
-                                        "kind": "hls" if "m3u8" in s_url else "mp4",
-                                        "extension": "m3u8" if "m3u8" in s_url else "mp4",
-                                        "is_downloadable": True
-                                    })
-            except Exception as e:
-                log.error(f"HentaiHaven stream extraction failed for {slug}: {e}")
-
-        dl_url = streams[0]["url"] if streams else ""
-
+            episodes = [{"id": slug, "slug": slug, "name": f"Episode {video.get('ep', 1)}",
+                         "title": f"Episode {video.get('ep', 1)}", "url": f"{HENTAI_TV_BASE}/watch/{raw_slug}"}]
         return {
-            'id':           slug,
-            'slug':         slug,
-            'name':         title,
-            'title':        title,
-            'description':  desc,
-            'summary':      desc,
-            'poster_url':   poster,
-            'cover_url':    poster,
-            'poster':       poster,
-            'cover':        poster,
-            'tags':         tags,
-            'genres':       tags,
-            'brand':        "HentaiHaven",
-            'views':        0,
-            'likes':        0,
-            'streams':      streams,
-            'dl_url':       dl_url,
-            'episodes':     episodes,
-            'totalEpisodes':len(episodes),
-            'url':          main_url,
+            "id": slug, "slug": slug, "name": video.get("title", raw_slug),
+            "title": video.get("title", raw_slug), "description": video.get("description", ""),
+            "summary": video.get("description", ""), "poster_url": cover, "cover_url": cover,
+            "poster": cover, "cover": cover, "tags": video.get("tags", []),
+            "genres": video.get("tags", []), "brand": video.get("brand", "hentai.tv"),
+            "views": video.get("views", 0), "likes": video.get("likes", 0),
+            "episodes": episodes,
+            "totalEpisodes": len(episodes), "url": f"{HENTAI_TV_BASE}/watch/{raw_slug}",
+            "streams": self._hentai_tv_streams(video.get("embedUrl", "")),
         }
+
+    def _hentai_tv_streams(self, embed_url: str) -> list[dict]:
+        if not embed_url:
+            return []
+        response = self.session.get(embed_url, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        item = soup.select_one(".servers li[data-id]")
+        if not item:
+            return []
+        player_url = _absolute("https://nhplayer.com", item.get("data-id"))
+        encoded = parse_qs(urlparse(player_url).query).get("vid", [""])[0]
+        try:
+            decoded = base64.b64decode(encoded).decode("utf-8")
+            video_url = decoded.split("|", 1)[0]
+        except Exception:
+            return []
+        return [{"url": video_url, "height": 1080, "kind": "mp4", "extension": "mp4", "label": "1080p", "is_downloadable": True}]
+
+    def _oppai_details(self, raw_slug: str) -> dict:
+        response = self.session.get(f"{OPPAI_BASE}/watch", params={"e": raw_slug}, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        if "locked.php" in response.url or soup.select_one(".login-required, .requires-login"):
+            log.info("Oppai episode requires login: %s", raw_slug)
+            return self._empty_details(_prefixed("oppai", raw_slug), "oppai.stream")
+        title = soup.select_one("h1")
+        title_text = title.get_text(" ", strip=True) if title else raw_slug.replace("-", " ").title()
+        title_text = re.sub(r"\s+Ep\s+\d+$", "", title_text, flags=re.I)
+        description = soup.select_one(".description")
+        poster = soup.select_one("video[poster]")
+        tags = [tag.get_text(" ", strip=True) for tag in soup.select(".tags .tag h5")]
+        streams = []
+        for resolution, source_url in re.findall(r'["\'](4k|1080|720)["\']\s*:\s*["\']([^"\']+)', response.text, re.I):
+            source_url = html.unescape(source_url).replace("\\/", "/")
+            if any(item["url"] == source_url for item in streams):
+                continue
+            streams.append({"url": html.unescape(source_url), "height": resolution, "kind": "mp4" if resolution != "4k" else "webm",
+                            "extension": "mp4" if resolution != "4k" else "webm", "label": "4K" if resolution == "4k" else f"{resolution}p", "is_downloadable": True})
+        if not streams:
+            source = soup.select_one("video#episode source")
+            if source and source.get("src"):
+                streams.append({"url": source["src"], "height": 720, "kind": "mp4", "extension": "mp4", "label": "720p", "is_downloadable": True})
+        slug = _prefixed("oppai", raw_slug)
+        episode_match = re.search(r"(?:-|%20)(\d+)$", raw_slug)
+        episode = _int(episode_match.group(1), 1) if episode_match else 1
+        return {
+            "id": slug, "slug": slug, "name": title_text, "title": title_text,
+            "description": description.get_text(" ", strip=True) if description else "",
+            "summary": description.get_text(" ", strip=True) if description else "",
+            "poster_url": poster.get("poster", "") if poster else "", "cover_url": poster.get("poster", "") if poster else "",
+            "poster": poster.get("poster", "") if poster else "", "cover": poster.get("poster", "") if poster else "",
+            "tags": tags, "genres": tags, "brand": "oppai.stream", "views": 0, "likes": 0,
+            "streams": streams, "episodes": [{"id": slug, "slug": slug, "name": f"Episode {episode}", "title": f"Episode {episode}", "url": response.url}],
+            "totalEpisodes": 1, "url": response.url,
+        }
+
+    @staticmethod
+    def _empty_details(slug: str, brand: str) -> dict:
+        title = slug.split("__", 1)[-1].replace("-", " ").title()
+        return {"id": slug, "slug": slug, "name": title, "title": title, "description": "", "summary": "",
+                "poster_url": "", "cover_url": "", "poster": "", "cover": "", "tags": [], "genres": [],
+                "brand": brand, "views": 0, "likes": 0, "streams": [], "episodes": [], "totalEpisodes": 0, "url": ""}

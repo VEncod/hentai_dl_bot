@@ -33,6 +33,7 @@ from plugin.channels import (
 from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
+from plugin.oppai_auth import oppai_login_command, oppai_logout_command, oppai_status_command
 from utils.autodelete import start_autodelete_loop, autodelete_message_middleware, autodelete_callback_middleware
 
 # ── Logging ─────────────────────────────────────────────────────────────
@@ -74,6 +75,8 @@ bot.mongo_url = MONGO_URL
 
 async def main():
     await init_db(MONGO_URL)
+    from api.hanime_api import HanimeAPI
+    await HanimeAPI.load_saved_session()
 
     # ── Auto-delete middleware (runs BEFORE all handlers on every private interaction) ──
     bot.add_handler(MessageHandler(autodelete_message_middleware, filters.private), group=-1)
@@ -87,6 +90,9 @@ async def main():
     bot.add_handler(MessageHandler(removeadmin_command, filters.command("removeadmin")))
     bot.add_handler(MessageHandler(admins_command, filters.command("admins")))
     bot.add_handler(MessageHandler(clearcache_command, filters.command("clearcache")))
+    bot.add_handler(MessageHandler(oppai_login_command, filters.command("oppai_login") & filters.private))
+    bot.add_handler(MessageHandler(oppai_logout_command, filters.command("oppai_logout") & filters.private))
+    bot.add_handler(MessageHandler(oppai_status_command, filters.command("oppai_status") & filters.private))
 
     # User management commands
     bot.add_handler(MessageHandler(request_command, filters.command("request")))
@@ -142,6 +148,9 @@ async def main():
         BotCommand("series", "List all archived series"),
         BotCommand("broadcast", "Broadcast message to all users"),
         BotCommand("clearcache", "Clear download cache"),
+        BotCommand("oppai_login", "Log in to Oppai.stream"),
+        BotCommand("oppai_logout", "Remove Oppai.stream login"),
+        BotCommand("oppai_status", "Check Oppai.stream login"),
         BotCommand("admins", "List all admins"),
         BotCommand("users", "List approved users"),
         BotCommand("pending", "View pending access requests"),
