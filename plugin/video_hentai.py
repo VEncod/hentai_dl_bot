@@ -263,8 +263,14 @@ class UploadProgressTracker:
         )
 
 
+CANCELLED_DOWNLOADS = set()
+
+
 async def cancel_download_callback(client: Client, callback_query: CallbackQuery):
     chat_id = callback_query.from_user.id
+    log.info("=== CANCEL CALLBACK RECEIVED for chat_id=%s ===", chat_id)
+    CANCELLED_DOWNLOADS.add(chat_id)
+
     if chat_id in ACTIVE_DOWNLOADS:
         dl_info = ACTIVE_DOWNLOADS[chat_id]
         dl_info["cancelled"] = True
@@ -290,7 +296,7 @@ async def cancel_download_callback(client: Client, callback_query: CallbackQuery
                 os.unlink(filename)
             except Exception:
                 pass
-        ACTIVE_DOWNLOADS.pop(chat_id, None)
+
         try:
             await callback_query.answer("🛑 Download cancelled!", show_alert=True)
         except Exception:
@@ -356,7 +362,7 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
 
                 with open(filename, "wb") as f:
                     async for chunk in resp.content.iter_chunked(512 * 1024):
-                        if chat_id and ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                        if chat_id in CANCELLED_DOWNLOADS or (chat_id and ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled")):
                             log.info("Download cancelled for chat %s", chat_id)
                             return False
                         f.write(chunk)
@@ -552,6 +558,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         [InlineKeyboardButton("🛑 Stop Download", callback_data=f"canceldl_{chat_id}")]
     ])
 
+    CANCELLED_DOWNLOADS.discard(chat_id)
     ACTIVE_DOWNLOADS[chat_id] = {
         "task": asyncio.current_task(),
         "slug": slug,
@@ -566,7 +573,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         active_stream_label = quality_label
 
         async def on_progress(stats):
-            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 raise asyncio.CancelledError("Cancelled by user")
             msg = tracker.format_message(stats, title=f"Downloading [{active_stream_label}]", slug=slug)
             await _safe_edit(callback_query, msg, reply_markup=cancel_keyboard)
@@ -587,7 +594,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
         for candidate in candidate_urls:
             # STOP immediately if user tapped cancel!
-            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 log.info("Download cancelled by user for chat %s, halting candidate loop", chat_id)
                 return
 
@@ -613,10 +620,10 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 log.info("Trying HLS download for %s: %s", slug, c_url[:80])
                 tracker = DownloadProgressTracker(0, start_time)
                 downloaded = await _download_n_m3u8dl(c_url, filename, on_progress, referer=c_ref)
-                if not downloaded and not ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                if not downloaded and chat_id not in CANCELLED_DOWNLOADS and not ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                     downloaded = await _download_hls_ffmpeg(c_url, filename, on_progress, referer=c_ref)
 
-            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 log.info("Download cancelled during candidate processing for chat %s", chat_id)
                 return
 
@@ -632,7 +639,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                         pass
 
         if not downloaded:
-            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 return
             elapsed = int(time.time() - start_time)
             is_oppai = "oppai" in slug
@@ -646,6 +653,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             return
     finally:
         ACTIVE_DOWNLOADS.pop(chat_id, None)
+        CANCELLED_DOWNLOADS.discard(chat_id)
 
     if not os.path.exists(filename) or os.path.getsize(filename) < 50_000:
         await _safe_edit(callback_query, "❌ Download produced an empty or corrupted file.")
