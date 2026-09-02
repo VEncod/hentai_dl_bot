@@ -18,6 +18,7 @@ from utils.keyboard import (
     get_main_reply_keyboard,
     get_user_search_source,
     set_user_search_source,
+    BUTTON_HENTAICITY,
     BUTTON_HENTAI_TV,
     BUTTON_OPPAI_STREAM,
     BUTTON_BOTH_SOURCES,
@@ -42,12 +43,12 @@ async def hentaisearch(client: Client, message: Message):
     reply_kb = get_main_reply_keyboard()
 
     # ── Handle Custom Reply Keyboard Selection Buttons ──────────────────────
-    if BUTTON_HENTAI_TV in query or "hentai.tv" in query.lower():
-        await set_user_search_source(user_id, "htv")
+    if BUTTON_HENTAICITY in query or BUTTON_HENTAI_TV in query or "hentaicity" in query.lower() or "hentai.tv" in query.lower():
+        await set_user_search_source(user_id, "hcity")
         msg = await message.reply_text(
-            "🌐 **Search Mode Selected: Hentai.tv (Default)**\n"
+            "🏙️ **Search Mode Selected: HentaiCity (Default)**\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "✅ Your searches will now query **Hentai.tv** in Full HD (1080p).\n\n"
+            "✅ Your searches will now query **HentaiCity** in Full HD (1080p).\n\n"
             "💬 **Type any hentai or anime name to search!**",
             reply_markup=reply_kb,
         )
@@ -71,7 +72,7 @@ async def hentaisearch(client: Client, message: Message):
         msg = await message.reply_text(
             "🔍 **Search Mode Selected: Both Sources**\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "✅ Your searches will now query both **Hentai.tv (1080p)** and **Oppai.stream (4K)**.\n\n"
+            "✅ Your searches will now query both **HentaiCity (1080p)** and **Oppai.stream (4K)**.\n\n"
             "💬 **Type any hentai or anime name to search!**",
             reply_markup=reply_kb,
         )
@@ -83,26 +84,22 @@ async def hentaisearch(client: Client, message: Message):
         return
 
     # ── Regular Text Search ────────────────────────────────────────────────
-    # Clear old bot messages from this chat
     await clear_chat_history(client, chat_id)
-    
-    # Track user's search message for auto-delete (10 min)
     await track_message(chat_id, message.id, sender_type="user")
     await log_search(client, message.from_user.username, query)
 
     # Determine user's selected search source
     source_pref = await get_user_search_source(user_id)
-    if source_pref == "htv":
-        source_label = "🌐 Hentai.tv (Default)"
-        status_text = f"🔎 **Searching Hentai.tv for:** `{query}`...\n⏳ *Fetching 1080p catalog...*"
+    if source_pref in ("hcity", "htv"):
+        source_label = "🏙️ HentaiCity (Default)"
+        status_text = f"🔎 **Searching HentaiCity for:** `{query}`...\n⏳ *Fetching 1080p catalog...*"
     elif source_pref == "oppai":
         source_label = "✨ Oppai.stream (4K)"
         status_text = f"🔎 **Searching Oppai.stream for:** `{query}`...\n⏳ *Fetching 4K catalog...*"
     else:
-        source_label = "🔍 Both Sources (Hentai.tv + Oppai 4K)"
-        status_text = f"🔎 **Searching for:** `{query}`...\n⏳ *Searching Hentai.tv and Oppai.stream...*"
+        source_label = "🔍 Both Sources (HentaiCity + Oppai 4K)"
+        status_text = f"🔎 **Searching for:** `{query}`...\n⏳ *Searching HentaiCity and Oppai.stream...*"
 
-    # 1. Send instant UI progress indicator
     status_msg = None
     try:
         status_msg = await message.reply_text(
@@ -129,7 +126,7 @@ async def hentaisearch(client: Client, message: Message):
             f"🔍 **Search Query:** `{query}`\n"
             f"🌐 **Source:** {source_label}\n\n"
             f"❌ **No results found.**\n"
-            f"💡 *Tip: Try searching with a shorter keyword (e.g. 'Overflow' or 'Liliana'), or switch search source using the keyboard below.*"
+            f"💡 *Tip: Try searching with a shorter keyword (e.g. 'Uncle' or 'Landlady'), or switch search source using the keyboard below.*"
         )
         if status_msg:
             try:

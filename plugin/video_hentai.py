@@ -73,6 +73,7 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
     has_4k = any(s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower() for s in streams)
     has_1080 = any(s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower() for s in streams)
     has_720 = any(s.get("height", 0) == 720 or "720" in s.get("label", "").lower() for s in streams)
+    has_480 = any(s.get("height", 0) == 480 or "480" in s.get("label", "").lower() for s in streams)
 
     if has_4k:
         buttons.append([InlineKeyboardButton("✨ Download 4K (2160p)", callback_data=f"dlt_{short_key}_4k")])
@@ -80,7 +81,9 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
         buttons.append([InlineKeyboardButton("📺 Download 1080p (Full HD)", callback_data=f"dlt_{short_key}_1080")])
     if has_720:
         buttons.append([InlineKeyboardButton("📱 Download 720p (HD)", callback_data=f"dlt_{short_key}_720")])
-    if not (has_4k or has_1080 or has_720):
+    if has_480:
+        buttons.append([InlineKeyboardButton("📼 Download 480p (SD)", callback_data=f"dlt_{short_key}_480")])
+    if not (has_4k or has_1080 or has_720 or has_480):
         buttons.append([InlineKeyboardButton("⬇️ Download Video", callback_data=f"dlt_{short_key}_best")])
 
     buttons.append([InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{short_key}")])
@@ -145,11 +148,11 @@ class DownloadProgressTracker:
         self.current_speed = 0.0
         self.eta_seconds = 0.0
         self.last_reported_time = 0.0
-    
+
     def update(self, downloaded: int) -> dict:
         now = time.time()
         self.downloaded = downloaded
-        
+
         time_delta = now - self.last_update_time
         if time_delta >= 1.0:
             bytes_delta = downloaded - self.last_update_bytes
@@ -159,10 +162,10 @@ class DownloadProgressTracker:
             if self.current_speed > 0 and self.total_size > 0:
                 remaining = max(0, self.total_size - downloaded)
                 self.eta_seconds = remaining / self.current_speed
-        
+
         pct = (downloaded / self.total_size * 100) if self.total_size > 0 else 0
         elapsed = now - self.start_time
-        
+
         return {
             "pct": min(100.0, pct),
             "downloaded": downloaded,
@@ -171,14 +174,14 @@ class DownloadProgressTracker:
             "eta": self.eta_seconds,
             "elapsed": elapsed,
         }
-    
+
     def should_update_ui(self, pct: float) -> bool:
         now = time.time()
         if (now - self.last_reported_time) >= PROGRESS_UPDATE_INTERVAL:
             self.last_reported_time = now
             return True
         return False
-    
+
     def format_message(self, stats: dict, title: str = "Downloading...", slug: str = "") -> str:
         pct = stats["pct"]
         bar = _progress_bar_detailed(pct)
@@ -186,7 +189,7 @@ class DownloadProgressTracker:
         eta = _format_time(stats["eta"])
         downloaded = _format_size(stats["downloaded"])
         total = _format_size(stats["total"]) if stats["total"] > 0 else "unknown"
-        
+
         return (
             f"📥 **{title}**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -207,12 +210,12 @@ class UploadProgressTracker:
         self.current_speed = 0.0
         self.eta_seconds = 0.0
         self.last_reported_time = 0.0
-    
+
     def update(self, current: int, total: int) -> dict:
         now = time.time()
         self.uploaded = current
         self.total_size = total
-        
+
         time_delta = now - self.last_update_time
         if time_delta >= 1.0:
             bytes_delta = current - self.last_update_bytes
@@ -222,10 +225,10 @@ class UploadProgressTracker:
             if self.current_speed > 0 and total > 0:
                 remaining = max(0, total - current)
                 self.eta_seconds = remaining / self.current_speed
-        
+
         pct = (current / total * 100) if total > 0 else 0
         elapsed = now - self.start_time
-        
+
         return {
             "pct": min(100.0, pct),
             "uploaded": current,
@@ -234,14 +237,14 @@ class UploadProgressTracker:
             "eta": self.eta_seconds,
             "elapsed": elapsed,
         }
-    
+
     def should_update_ui(self, pct: float) -> bool:
         now = time.time()
         if (now - self.last_reported_time) >= PROGRESS_UPDATE_INTERVAL:
             self.last_reported_time = now
             return True
         return False
-    
+
     def format_message(self, stats: dict, slug: str = "") -> str:
         pct = stats["pct"]
         bar = _progress_bar_detailed(pct)
@@ -249,7 +252,7 @@ class UploadProgressTracker:
         eta = _format_time(stats["eta"])
         uploaded = _format_size(stats["uploaded"])
         total = _format_size(stats["total"]) if stats["total"] > 0 else "unknown"
-        
+
         return (
             f"📤 **Uploading to Telegram...**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -280,14 +283,13 @@ async def cancel_download_callback(client: Client, callback_query: CallbackQuery
         task = dl_info.get("task")
         if task and not task.done():
             task.cancel()
-            
+
         filename = dl_info.get("filename")
         if filename and os.path.exists(filename):
             try:
                 os.unlink(filename)
             except Exception:
                 pass
-        slug = dl_info.get("slug", "")
         ACTIVE_DOWNLOADS.pop(chat_id, None)
         try:
             await callback_query.answer("🛑 Download cancelled!", show_alert=True)
@@ -314,21 +316,21 @@ async def _safe_edit(callback_query: CallbackQuery, text: str, reply_markup=None
 
 async def _download_direct(url: str, filename: str, progress_cb=None, referer: str = "", chat_id: int = 0) -> bool:
     try:
-        if "oppai.stream" in url or "myspacecat.pictures" in url:
+        if "hentaicity.com" in url:
+            referer = "https://www.hentaicity.com/"
+        elif "oppai.stream" in url or "myspacecat.pictures" in url:
             referer = "https://oppai.stream/"
         elif not referer:
-            if "hentai.tv" in url or "nhplayer.com" in url or "1hanime.com" in url:
-                referer = "https://hentai.tv/"
+            referer = "https://www.hentaicity.com/"
 
         timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=60)
         connector = aiohttp.TCPConnector(limit=5, force_close=False)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*",
+            "Referer": referer,
+            "Origin": referer.rstrip("/"),
         }
-        if referer:
-            headers["Referer"] = referer
-            headers["Origin"] = referer.rstrip("/")
 
         async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers) as session:
             if chat_id and chat_id in ACTIVE_DOWNLOADS:
@@ -337,7 +339,7 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
             async with session.get(url) as resp:
                 if chat_id and chat_id in ACTIVE_DOWNLOADS:
                     ACTIVE_DOWNLOADS[chat_id]["response"] = resp
-                
+
                 resp.raise_for_status()
                 ct = resp.content_type or ""
                 if "text/html" in ct or "application/json" in ct:
@@ -442,7 +444,7 @@ async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None, refere
 
 
 def _extract_series_name(slug: str) -> str:
-    s = slug.replace("htv__", "").replace("oppai__", "")
+    s = slug.replace("hcity__", "").replace("htv__", "").replace("oppai__", "")
     s = re.sub(r"-episode-\d+$", "", s, flags=re.I)
     s = re.sub(r"[-_]\d+$", "", s)
     return s.replace("-", " ").strip().title()
@@ -462,6 +464,9 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         raw_slug = raw_data[:-5]
     elif raw_data.endswith("_720"):
         target_quality = "720"
+        raw_slug = raw_data[:-4]
+    elif raw_data.endswith("_480"):
+        target_quality = "480"
         raw_slug = raw_data[:-4]
     elif raw_data.endswith("_best"):
         target_quality = "best"
@@ -539,7 +544,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     primary_stream = streams[0] if streams else {}
     ext = primary_stream.get("extension") or ("webm" if dl_url.endswith(".webm") else "mp4")
-    referer = primary_stream.get("referer", "")
+    referer = primary_stream.get("referer", "https://www.hentaicity.com/")
     quality_label = primary_stream.get("label", "1080p")
     filename = f"{slug}.{ext}"
 
@@ -581,6 +586,11 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 candidate_urls.append(s)
 
         for candidate in candidate_urls:
+            # STOP immediately if user tapped cancel!
+            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                log.info("Download cancelled by user for chat %s, halting candidate loop", chat_id)
+                return
+
             c_url = candidate.get("url", "")
             if not c_url:
                 continue
@@ -589,7 +599,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             c_label = candidate.get("label", quality_label)
             c_ext = candidate.get("extension", "mp4")
             active_stream_label = c_label
-            
+
             if c_ext and filename.rsplit(".", 1)[-1] != c_ext:
                 filename = f"{slug}.{c_ext}"
                 if chat_id in ACTIVE_DOWNLOADS:
@@ -603,8 +613,12 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 log.info("Trying HLS download for %s: %s", slug, c_url[:80])
                 tracker = DownloadProgressTracker(0, start_time)
                 downloaded = await _download_n_m3u8dl(c_url, filename, on_progress, referer=c_ref)
-                if not downloaded:
+                if not downloaded and not ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                     downloaded = await _download_hls_ffmpeg(c_url, filename, on_progress, referer=c_ref)
+
+            if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                log.info("Download cancelled during candidate processing for chat %s", chat_id)
+                return
 
             if downloaded and os.path.exists(filename) and os.path.getsize(filename) > 50_000:
                 log.info("Download completed successfully: %s (%s)", filename, c_label)
@@ -646,7 +660,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
     try:
         file_size = os.path.getsize(filename)
         upload_tracker = UploadProgressTracker(file_size, time.time())
-        
+
         async def upload_progress(current, total):
             stats = upload_tracker.update(current, total)
             if upload_tracker.should_update_ui(stats["pct"]):
@@ -668,7 +682,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             info = await asyncio.to_thread(hanime_api.details, slug)
             series_name = _extract_series_name(slug)
             tags_str = ", ".join(info.get("tags", [])[:5])
-            brand = info.get("brand") or ("oppai.stream (4K)" if "4k" in quality_label.lower() else "hentai.tv")
+            brand = info.get("brand") or "hentaicity.com"
             caption = (
                 f"🎬 **{info.get('title') or slug}**\n\n"
                 f"✨ **Quality:** {quality_label}\n"
@@ -816,7 +830,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         streams = data.get("streams", [])
         primary_stream = streams[0] if streams else {}
         ext = primary_stream.get("extension") or ("webm" if dl_url.endswith(".webm") else "mp4")
-        referer = primary_stream.get("referer", "")
+        referer = primary_stream.get("referer", "https://www.hentaicity.com/")
         quality_label = primary_stream.get("label", "1080p")
         filename = f"{ep_slug}.{ext}"
         downloaded = False

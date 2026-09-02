@@ -79,7 +79,7 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
     summary = info.get("description") or "No description available."
     tags = info.get("tags", [])
     episodes = info.get("episodes", [])
-    brand = info.get("brand") or "hentai.tv"
+    brand = info.get("brand") or "hentaicity.com"
 
     tags_str = ", ".join(tags[:8]) if tags else "N/A"
     if len(tags) > 8:
@@ -118,10 +118,11 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
         # Single episode series -> Show direct Quality Download Buttons
         streams_data = await asyncio.to_thread(hanime_api.get_streams, slug)
         streams = streams_data.get("streams", [])
-        
+
         has_4k = any(s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower() for s in streams)
         has_1080 = any(s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower() for s in streams)
         has_720 = any(s.get("height", 0) == 720 or "720" in s.get("label", "").lower() for s in streams)
+        has_480 = any(s.get("height", 0) == 480 or "480" in s.get("label", "").lower() for s in streams)
 
         if has_4k:
             buttons.append([InlineKeyboardButton("✨ Download 4K (2160p)", callback_data=f"dlt_{short_key}_4k")])
@@ -129,14 +130,15 @@ async def infohentai(client: Client, callback_query: CallbackQuery):
             buttons.append([InlineKeyboardButton("📺 Download 1080p (Full HD)", callback_data=f"dlt_{short_key}_1080")])
         if has_720:
             buttons.append([InlineKeyboardButton("📱 Download 720p (HD)", callback_data=f"dlt_{short_key}_720")])
-        if not buttons:
+        if has_480:
+            buttons.append([InlineKeyboardButton("📼 Download 480p (SD)", callback_data=f"dlt_{short_key}_480")])
+        if not (has_4k or has_1080 or has_720 or has_480):
             buttons.append([InlineKeyboardButton("⬇️ Download Video", callback_data=f"dlt_{short_key}_best")])
 
         buttons.append([InlineKeyboardButton("🔗 Web Stream Links", callback_data=f"link_{short_key}")])
 
     keyboard = InlineKeyboardMarkup(buttons)
 
-    # Try sending with poster
     sent_photo = False
     if poster:
         sent_photo = await _send_with_poster(client, chat_id, poster, text, keyboard)
@@ -182,7 +184,7 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
 
     name = info.get("title") or info.get("name") or slug
     poster = info.get("poster_url") or info.get("cover_url") or ""
-    brand = info.get("brand") or "hentai.tv"
+    brand = info.get("brand") or "hentaicity.com"
 
     text = (
         f"📺 **{name}**\n"
@@ -197,6 +199,7 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
     has_4k = any(s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower() for s in streams)
     has_1080 = any(s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower() for s in streams)
     has_720 = any(s.get("height", 0) == 720 or "720" in s.get("label", "").lower() for s in streams)
+    has_480 = any(s.get("height", 0) == 480 or "480" in s.get("label", "").lower() for s in streams)
 
     if has_4k:
         buttons.append([InlineKeyboardButton("✨ Download 4K (2160p Ultra HD)", callback_data=f"dlt_{short_key}_4k")])
@@ -204,7 +207,9 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
         buttons.append([InlineKeyboardButton("📺 Download 1080p (Full HD)", callback_data=f"dlt_{short_key}_1080")])
     if has_720:
         buttons.append([InlineKeyboardButton("📱 Download 720p (HD)", callback_data=f"dlt_{short_key}_720")])
-    if not (has_4k or has_1080 or has_720):
+    if has_480:
+        buttons.append([InlineKeyboardButton("📼 Download 480p (SD)", callback_data=f"dlt_{short_key}_480")])
+    if not (has_4k or has_1080 or has_720 or has_480):
         buttons.append([InlineKeyboardButton("⬇️ Download Video", callback_data=f"dlt_{short_key}_best")])
 
     buttons.append([InlineKeyboardButton("🔗 Web Stream Link", callback_data=f"link_{short_key}")])
