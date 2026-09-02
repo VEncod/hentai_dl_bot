@@ -671,7 +671,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             callback_query,
             f"📤 **Uploading to Telegram...**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"[{'█'*6}{'░'*6}] 50.0%\n\n"
+            f"[{'░'*12}] 0.0%\n\n"
             f"📊 **Size:** {_format_size(file_size)}\n"
             f"✨ **Quality:** {quality_label}"
         )
@@ -697,23 +697,36 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             series_name = _extract_series_name(slug)
             caption = f"🎬 **{slug}**\nDownloaded via @hentai_dl_bot"
 
-        sent = await client.send_document(
-            chat_id=chat_id,
-            document=filename,
-            caption=caption,
-            progress=upload_progress,
-            thumb=thumb_path,
-        )
+        sent = None
+        try:
+            sent = await client.send_video(
+                chat_id=chat_id,
+                video=filename,
+                caption=caption,
+                progress=upload_progress,
+                thumb=thumb_path,
+                supports_streaming=True,
+            )
+        except Exception as e_vid:
+            log.warning("send_video failed (%s), falling back to send_document", e_vid)
+            sent = await client.send_document(
+                chat_id=chat_id,
+                document=filename,
+                caption=caption,
+                progress=upload_progress,
+                thumb=thumb_path,
+            )
 
         await track_message(chat_id, sent.id)
-        file_id = sent.document.file_id
+        file_id = (sent.video.file_id if sent.video else sent.document.file_id) if sent else ""
 
         # Cache file in DB
-        await db.Name.update_one(
-            {"name": cache_key},
-            {"$set": {"name": cache_key, "file_id": file_id, "file_size": file_size, "slug": slug, "quality": quality_label}},
-            upsert=True,
-        )
+        if file_id:
+            await db.Name.update_one(
+                {"name": cache_key},
+                {"$set": {"name": cache_key, "file_id": file_id, "file_size": file_size, "slug": slug, "quality": quality_label}},
+                upsert=True,
+            )
 
         await _safe_edit(
             callback_query,

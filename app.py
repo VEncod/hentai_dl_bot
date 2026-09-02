@@ -69,6 +69,9 @@ bot = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     plugins=None,
+    max_concurrent_transmissions=4,
+    sleep_threshold=60,
+    workers=8,
 )
 bot.mongo_url = MONGO_URL
 
