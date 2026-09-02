@@ -10,7 +10,7 @@ try:
 except ImportError:
     pass
 
-from wzgram import Client, filters, idle, errors
+from wzgram import Client, filters, idle
 from wzgram.types import BotCommand
 from wzgram.handlers import MessageHandler, CallbackQueryHandler
 
@@ -33,8 +33,7 @@ from plugin.channels import (
 from plugin.archive import archive_command, series_command
 from plugin.catalog import catalog_episodes_callback
 from plugin.broadcast import broadcast_command
-from utils.autodelete import start_autodelete_loop, set_userbot, autodelete_message_middleware, autodelete_callback_middleware
-from utils.session_store import load_session_string, save_session_string, delete_session_string
+from utils.autodelete import start_autodelete_loop, autodelete_message_middleware, autodelete_callback_middleware
 
 # ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -48,7 +47,6 @@ API_ID         = os.environ.get("API_ID")
 API_HASH       = os.environ.get("API_HASH")
 BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 MONGO_URL      = os.environ.get("MONGO_URL")
-SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
 _missing = [k for k, v in {
     "API_ID": API_ID,
@@ -73,47 +71,9 @@ bot = Client(
 )
 bot.mongo_url = MONGO_URL
 
-# ── Userbot client (optional) ────────────────────────────────────────────
-# Used solely to delete user messages / wipe chat history.
-# Set SESSION_STRING env var to enable, or it will be loaded from DB.
-# Generate it with: python gen_session.py
-userbot = None
-
 
 async def main():
     await init_db(MONGO_URL)
-
-    # ── Load or save session string ─────────────────────────────────────
-    global SESSION_STRING
-    db_session = await load_session_string()
-    if SESSION_STRING:
-        # Env var takes priority — save to DB for next time
-        if db_session != SESSION_STRING:
-            await save_session_string(SESSION_STRING)
-    elif db_session:
-        # Load from DB since env var is empty
-        SESSION_STRING = db_session
-        log.info("Session string loaded from database")
-
-    # Initialize userbot if session string is available
-    global userbot
-    if SESSION_STRING and SESSION_STRING.strip():
-        try:
-            userbot = Client(
-                "hentai_userbot",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                session_string=SESSION_STRING.strip(),
-                plugins=None,
-                no_updates=True,
-            )
-            log.info("Userbot session configured — full chat wipe enabled")
-        except Exception as e:
-            log.warning("Invalid session string (%s: %s). Falling back to normal bot mode.", type(e).__name__, e)
-            await delete_session_string()
-            userbot = None
-    else:
-        log.info("No SESSION_STRING provided — running in normal bot mode")
 
     # ── Auto-delete middleware (runs BEFORE all handlers on every private interaction) ──
     bot.add_handler(MessageHandler(autodelete_message_middleware, filters.private), group=-1)
@@ -174,31 +134,6 @@ async def main():
     # Set bot commands visible in Telegram menu
     await bot.start()
 
-    # Start userbot if configured (with fallback to normal bot mode if session revoked/invalid)
-    if userbot:
-        try:
-            await userbot.start()
-            set_userbot(userbot)
-            log.info("Userbot started successfully — user message deletion enabled")
-        except (errors.Unauthorized, errors.AuthKeyUnregistered, errors.SessionRevoked, errors.SessionExpired, errors.UserDeactivated) as e:
-            log.warning(
-                "Userbot session was terminated or revoked by Telegram (%s: %s). "
-                "Falling back to normal bot mode. (Run gen_session.py to create a new session string)",
-                type(e).__name__, e
-            )
-            await delete_session_string()
-            userbot = None
-            set_userbot(None)
-        except Exception as e:
-            log.warning(
-                "Failed to start userbot (%s: %s). Falling back to normal bot mode.",
-                type(e).__name__, e
-            )
-            if any(kw in type(e).__name__ for kw in ("AuthKey", "Session", "Key", "Unauthorized", "UserDeactivated")):
-                await delete_session_string()
-            userbot = None
-            set_userbot(None)
-
     await bot.set_bot_commands([
         BotCommand("start", "Start the bot"),
         BotCommand("delete", "Delete downloaded files from MongoDB & channels"),
@@ -221,15 +156,9 @@ async def main():
     # Start auto-delete background task
     asyncio.create_task(start_autodelete_loop(bot))
 
-    log.info("Bot started successfully! Commands registered.")
+    log.info("Bot started successfully! Auto-delete active.")
     await idle()
     await bot.stop()
-    if userbot:
-        try:
-            if getattr(userbot, "is_connected", False):
-                await userbot.stop()
-        except Exception as e:
-            log.warning("Error stopping userbot: %s", e)
     log.info("Bot stopped.")
 
 

@@ -87,7 +87,6 @@ Go to your service → **Variables** tab and add:
 | `API_HASH` | ✅ | Telegram API Hash from [my.telegram.org](https://my.telegram.org) |
 | `BOT_TOKEN` | ✅ | Bot token from [@BotFather](https://t.me/BotFather) |
 | `MONGO_URL` | ✅ | MongoDB connection string |
-| `SESSION_STRING` | ❌ | Pyrogram session string (enables userbot features) |
 
 > 💡 **Get a free MongoDB:** Sign up at [MongoDB Atlas](https://www.mongodb.com/atlas) and create a free M0 cluster.
 
@@ -188,7 +187,7 @@ cd ~ && git clone https://github.com/VEncod/hentai_dl_bot.git && cd hentai_dl_bo
 
 The script will:
 - Install Docker and Docker Compose
-- Ask for your environment variables (API_ID, API_HASH, BOT_TOKEN, MONGO_URL, SESSION_STRING)
+- Ask for your environment variables (API_ID, API_HASH, BOT_TOKEN, MONGO_URL)
 - Build the Docker image and start the bot in the background
 
 #### After Setup
@@ -263,7 +262,6 @@ os.environ["MONGO_URL"] = "your_mongo_url"
 | `API_HASH` | ✅ | Telegram API Hash |
 | `BOT_TOKEN` | ✅ | Bot token from [@BotFather](https://t.me/BotFather) |
 | `MONGO_URL` | ✅ | MongoDB connection string |
-| `SESSION_STRING` | ❌ | Pyrogram session string (enables userbot message deletion) |
 
 ---
 

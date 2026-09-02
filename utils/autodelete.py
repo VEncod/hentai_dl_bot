@@ -3,7 +3,7 @@ Auto-delete system — wipes chat history after a set delay.
 
 Features:
 - Stores tracked message IDs in MongoDB (db.autodelete) so tracked messages survive bot restarts.
-- Auto-wipes private chat messages via Bot Client (and Userbot if configured).
+- Auto-wipes private chat messages via Bot Client.
 """
 
 import asyncio
@@ -17,7 +17,6 @@ log = logging.getLogger(__name__)
 WIPE_AFTER_MINUTES = 10
 
 _bot: Client | None = None
-_userbot: Client | None = None
 _active_timers: dict[int, asyncio.Task] = {}
 
 
@@ -25,37 +24,6 @@ def set_bot(client: Client):
     global _bot
     _bot = client
     log.info("Bot client registered for auto-delete")
-
-
-def set_userbot(client: Client | None):
-    """Register or unregister the userbot client for user message deletion."""
-    global _userbot
-    _userbot = client
-    if client:
-        log.info("Userbot registered for auto-delete")
-    else:
-        log.info("Userbot unregistered / disabled for auto-delete")
-
-
-async def _handle_userbot_error(e: Exception):
-    """Check if exception was caused by session revocation / termination."""
-    global _userbot
-    error_name = type(e).__name__
-    is_auth_error = any(
-        kw in error_name for kw in ("AuthKey", "SessionRevoked", "SessionExpired", "Unauthorized", "UserDeactivated")
-    )
-    if is_auth_error:
-        log.warning(
-            "Userbot session was terminated or revoked by Telegram (%s: %s). Falling back to normal bot mode.",
-            error_name, e
-        )
-        _userbot = None
-        try:
-            from utils.session_store import delete_session_string
-            await delete_session_string()
-        except Exception:
-            pass
-
 
 
 async def _track_db(chat_id: int, message_id: int):
@@ -97,17 +65,7 @@ async def _wipe_chat(chat_id: int):
                 deleted += len(batch)
                 batch_deleted = True
             except Exception as e:
-                log.warning("Bot delete_messages failed for chat %s: %s", chat_id, e)
-
-        if _userbot and not batch_deleted:
-            try:
-                count = await _userbot.delete_messages(chat_id, batch, revoke=True)
-                log.info("Userbot delete_messages for chat %s: result=%s", chat_id, count)
-                deleted += len(batch)
-                batch_deleted = True
-            except Exception as e:
-                await _handle_userbot_error(e)
-                log.warning("Userbot delete_messages failed for chat %s: %s", chat_id, e)
+                log.warning("Bot batch delete_messages failed for chat %s: %s", chat_id, e)
 
         # Last resort: delete one by one via bot
         if _bot and not batch_deleted:
@@ -117,24 +75,6 @@ async def _wipe_chat(chat_id: int):
                     deleted += 1
                 except Exception as e:
                     log.warning("Bot single delete failed for chat %s msg %s: %s", chat_id, mid, e)
-
-    # Also try to get and delete any untracked messages via userbot
-    if _userbot:
-        try:
-            remaining = []
-            async for msg in _userbot.get_chat_history(chat_id, limit=200):
-                remaining.append(msg.id)
-            if remaining:
-                log.info("Found %d untracked messages in chat %s, deleting", len(remaining), chat_id)
-                for i in range(0, len(remaining), 100):
-                    batch = remaining[i:i + 100]
-                    try:
-                        await _userbot.delete_messages(chat_id, batch, revoke=True)
-                    except Exception as e:
-                        await _handle_userbot_error(e)
-        except Exception as e:
-            await _handle_userbot_error(e)
-            log.debug("Userbot cleanup for chat %s: %s", chat_id, e)
 
     await db.autodelete.delete_one({"chat_id": chat_id})
     log.info("Chat wipe complete for %s: deleted %d messages (tracked %d)", chat_id, deleted, len(msg_ids))
@@ -217,15 +157,8 @@ async def clear_chat_history(client: Client, chat_id: int, preserve_message_ids:
 
 
 async def delete_user_message(chat_id: int, message_id: int):
-    """Delete a single user message immediately."""
-    deleted = False
-    if _userbot:
-        try:
-            await _userbot.delete_messages(chat_id, message_id)
-            deleted = True
-        except Exception as e:
-            await _handle_userbot_error(e)
-    if not deleted and _bot:
+    """Delete a single message immediately."""
+    if _bot:
         try:
             await _bot.delete_messages(chat_id, message_id)
         except Exception:
