@@ -153,42 +153,9 @@ class HanimeAPI:
             return self._hentai_tv_details(raw_slug)
         return self._oppai_details(raw_slug)
 
-    def get_streams(self, slug: str) -> dict:
+    def get_streams(self, slug: str, target_quality: str | None = None) -> dict:
         info = self.details(slug)
         streams = list(info.get("streams", []))
-        
-        # Cross-resolve from Oppai if this is an htv title
-        if slug.startswith("htv__"):
-            try:
-                title = info.get("title") or info.get("name") or ""
-                ep = 1
-                for e in info.get("episodes", []):
-                    if e.get("slug") == slug:
-                        ep = e.get("ep", 1)
-                        break
-                
-                clean_title = re.sub(r"—\s*", " ", title)
-                clean_title = re.sub(r"\b(Season|The Animation|OVA|Episode\s*\d+)\b", "", clean_title, flags=re.I)
-                clean_title = re.sub(r"\s+", " ", clean_title).strip()
-                
-                if clean_title:
-                    oppai_res = self._search_oppai(clean_title)
-                    oppai_match = None
-                    for item in oppai_res:
-                        m = re.search(r"[-_](\d+)$", item.get("slug", ""))
-                        if m and int(m.group(1)) == ep:
-                            oppai_match = item
-                            break
-                    if not oppai_match and oppai_res:
-                        oppai_match = oppai_res[0]
-
-                    if oppai_match:
-                        oppai_det = self.details(oppai_match["slug"])
-                        for st in oppai_det.get("streams", []):
-                            if st.get("url") and not any(existing.get("url") == st["url"] for existing in streams):
-                                streams.append(st)
-            except Exception as e:
-                log.debug("Cross-source resolution failed for %s: %s", slug, e)
 
         # Sort quality preference: 4K/2160p (0) > 1080p (1) > 720p (2)
         quality_order = {"4k": 0, "2160": 0, "1080": 1, "720": 2}
@@ -199,6 +166,22 @@ class HanimeAPI:
                 -_int(item.get("height", 0))
             ),
         )
+
+        # If a specific target quality was selected by user, prioritize it
+        if target_quality:
+            tq = str(target_quality).lower().strip()
+            if tq in ("4k", "2160", "2160p"):
+                matched = [s for s in streams if s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower()]
+            elif tq in ("1080", "1080p"):
+                matched = [s for s in streams if s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower()]
+            elif tq in ("720", "720p"):
+                matched = [s for s in streams if s.get("height", 0) == 720 or "720" in s.get("label", "").lower()]
+            else:
+                matched = []
+            if matched:
+                rest = [s for s in streams if s not in matched]
+                streams = matched + rest
+
         dl_url = streams[0].get("url", "") if streams else ""
         return {
             "streams": streams,
@@ -218,7 +201,7 @@ class HanimeAPI:
         response = self.session.get(
             f"{HENTAI_TV_BASE}/api/search",
             params={"q": query, "limit": 40},
-            timeout=15,
+            timeout=10,
         )
         response.raise_for_status()
         results = []
@@ -227,29 +210,49 @@ class HanimeAPI:
         except Exception:
             return results
 
-        for video in data.get("videos", []):
-            raw_slug = video.get("slug")
+        videos = data.get("videos", [])
+        if not videos:
+            return results
+
+        # Group videos by Series Album (titleSlug / title)
+        series_map = {}
+        for v in videos:
+            raw_slug = v.get("slug")
             if not raw_slug:
                 continue
-            cover = _absolute(HENTAI_TV_BASE, video.get("cover") or video.get("featureImage") or video.get("thumb"))
-            slug = _prefixed("htv", raw_slug)
-            title = video.get("title") or raw_slug
-            quality = video.get("quality") or "1080p"
+            key = v.get("titleSlug") or v.get("title") or raw_slug
+            if key not in series_map:
+                cover = _absolute(HENTAI_TV_BASE, v.get("cover") or v.get("featureImage") or v.get("thumb"))
+                series_map[key] = {
+                    "slug": _prefixed("htv", raw_slug),
+                    "title": v.get("title") or raw_slug,
+                    "cover": cover,
+                    "quality": v.get("quality") or "1080p",
+                    "tags": v.get("tags", []),
+                    "brand": v.get("brand", "hentai.tv"),
+                    "description": v.get("description", ""),
+                    "episodes": [],
+                }
+            series_map[key]["episodes"].append(v)
+
+        for key, item in series_map.items():
+            ep_count = len(item["episodes"])
+            ep_label = f" ({ep_count} Ep)" if ep_count == 1 else f" ({ep_count} Eps)"
             results.append({
-                "id": slug,
-                "slug": slug,
-                "name": title,
-                "title": f"{title} [{quality}]",
+                "id": item["slug"],
+                "slug": item["slug"],
+                "name": item["title"],
+                "title": f"{item['title']}{ep_label} [{item['quality']}]",
                 "source": "hentai.tv",
-                "quality": quality,
-                "cover_url": cover,
-                "poster_url": cover,
-                "cover": cover,
-                "tags": video.get("tags", []),
-                "views": video.get("views", 0),
-                "brand": video.get("brand", "hentai.tv"),
-                "description": video.get("description", ""),
-                "url": f"{HENTAI_TV_BASE}/watch/{raw_slug}",
+                "quality": item["quality"],
+                "cover_url": item["cover"],
+                "poster_url": item["cover"],
+                "cover": item["cover"],
+                "tags": item["tags"],
+                "views": 0,
+                "brand": item["brand"],
+                "description": item["description"],
+                "episodes_count": ep_count,
             })
         return results
 
@@ -267,12 +270,17 @@ class HanimeAPI:
                 "ibt": 0,
                 "swa": 0,
             },
-            timeout=15,
+            timeout=10,
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
-        results = []
-        for card in soup.select(".episode-shown"):
+        
+        cards = soup.select(".episode-shown")
+        if not cards:
+            return []
+
+        series_map = {}
+        for card in cards:
             link = card.select_one("a[href*='/watch?e=']")
             if not link:
                 continue
@@ -282,30 +290,57 @@ class HanimeAPI:
                 continue
             title_node = card.select_one("font.title")
             title = title_node.get_text(" ", strip=True) if title_node else card.get("name", raw_slug)
+            
+            # Extract series title by stripping trailing Ep/Episode number
+            series_title = re.sub(r"\s+Ep\s+\d+$", "", title, flags=re.I).strip()
+            series_title = re.sub(r"[-_]\d+$", "", series_title).replace("-", " ").strip()
+            if not series_title:
+                series_title = title
+
             cover_node = card.select_one("img.cover-img-in")
             cover = _absolute(OPPAI_BASE, cover_node.get("original") or cover_node.get("src")) if cover_node else ""
             tags = [tag.get_text(" ", strip=True) for tag in card.select(".tags-video .fh-tag")]
             tags.extend(x.strip() for x in (card.get("tags") or "").split(",") if x.strip() and x.strip() not in tags)
             
-            # Check for 4K quality tag
             is_4k = any(t.lower() == "4k" for t in tags) or "4k" in (card.get("tags") or "").lower()
             quality_label = "4K" if is_4k else "1080p"
             slug = _prefixed("oppai", raw_slug)
+
+            if series_title not in series_map:
+                series_map[series_title] = {
+                    "slug": slug,
+                    "title": series_title,
+                    "quality": quality_label,
+                    "cover": cover,
+                    "tags": tags,
+                    "brand": "oppai.stream (4K)" if is_4k else "oppai.stream",
+                    "description": card.get("desc", ""),
+                    "episodes": [],
+                }
+            if is_4k:
+                series_map[series_title]["quality"] = "4K"
+                series_map[series_title]["brand"] = "oppai.stream (4K)"
+            series_map[series_title]["episodes"].append(raw_slug)
+
+        results = []
+        for series_title, item in series_map.items():
+            ep_count = len(item["episodes"])
+            ep_label = f" ({ep_count} Ep)" if ep_count == 1 else f" ({ep_count} Eps)"
             results.append({
-                "id": slug,
-                "slug": slug,
-                "name": title,
-                "title": f"{title} [{quality_label}]",
+                "id": item["slug"],
+                "slug": item["slug"],
+                "name": item["title"],
+                "title": f"{item['title']}{ep_label} [{item['quality']}]",
                 "source": "oppai.stream",
-                "quality": quality_label,
-                "cover_url": cover,
-                "poster_url": cover,
-                "cover": cover,
-                "tags": tags,
+                "quality": item["quality"],
+                "cover_url": item["cover"],
+                "poster_url": item["cover"],
+                "cover": item["cover"],
+                "tags": item["tags"],
                 "views": 0,
-                "brand": "oppai.stream (4K)" if is_4k else "oppai.stream",
-                "description": card.get("desc", ""),
-                "url": raw_url,
+                "brand": item["brand"],
+                "description": item["description"],
+                "episodes_count": ep_count,
             })
         return results
 

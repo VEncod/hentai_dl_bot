@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,11 +14,7 @@ from wzgram.types import (
     InlineKeyboardMarkup,
 )
 
-import re
-
 from api.hanime_api import HanimeAPI, BASE_URL
-
-hanime_api = HanimeAPI()
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.db import get_db
@@ -28,6 +25,7 @@ from utils.logger import (
     log_download_start, log_download_progress, log_upload_complete,
     log_error, get_main_channel,
 )
+from utils.slug_map import get_short_slug, resolve_slug
 
 log = logging.getLogger(__name__)
 
@@ -37,11 +35,10 @@ DOWNLOAD_TIMEOUT = 120
 FFMPEG_TIMEOUT = 60
 N_M3U8DL_TIMEOUT = 60
 
-PROGRESS_UPDATE_INTERVAL = 2.0
-PROGRESS_MIN_PERCENT_STEP = 3
+PROGRESS_UPDATE_INTERVAL = 3.5
 
-
-from utils.slug_map import get_short_slug, resolve_slug
+ACTIVE_DOWNLOADS = {}
+hanime_api = HanimeAPI()
 
 
 async def hentailink(client: Client, callback_query: CallbackQuery):
@@ -70,49 +67,37 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
     )
     if watch_url:
         text += f"🌐 **Web Stream:** [Watch on Web]({watch_url})\n\n"
-    text += "Use the **Download** button below to download the highest quality directly in Telegram."
+    text += "Use the buttons below to choose your desired quality to download."
 
-    keyboard = [
-        [InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{short_key}")],
-        [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{short_key}")]
-    ]
+    buttons = []
+    has_4k = any(s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower() for s in streams)
+    has_1080 = any(s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower() for s in streams)
+    has_720 = any(s.get("height", 0) == 720 or "720" in s.get("label", "").lower() for s in streams)
+
+    if has_4k:
+        buttons.append([InlineKeyboardButton("✨ Download 4K (2160p)", callback_data=f"dlt_{short_key}_4k")])
+    if has_1080:
+        buttons.append([InlineKeyboardButton("📺 Download 1080p (Full HD)", callback_data=f"dlt_{short_key}_1080")])
+    if has_720:
+        buttons.append([InlineKeyboardButton("📱 Download 720p (HD)", callback_data=f"dlt_{short_key}_720")])
+    if not (has_4k or has_1080 or has_720):
+        buttons.append([InlineKeyboardButton("⬇️ Download Video", callback_data=f"dlt_{short_key}_best")])
+
+    buttons.append([InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{short_key}")])
 
     await callback_query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(buttons),
         disable_web_page_preview=False,
     )
 
 
-def _progress_bar(pct: float, length: int = 12) -> str:
-    filled = int(length * pct / 100)
-    empty = length - filled
-    bar = "█" * filled + "▒" * empty
-    return f"[{bar}] {pct:.1f}%"
-
-
-def _progress_bar_detailed(pct: float, length: int = 14) -> str:
+def _progress_bar_detailed(pct: float, length: int = 12) -> str:
+    pct = max(0.0, min(100.0, pct))
     filled = int(length * pct / 100)
     empty = length - filled
     bar = "█" * filled + "░" * empty
     return f"[{bar}] {pct:.1f}%"
-
-
-def _get_progress_emoji(pct: float) -> str:
-    if pct < 10:
-        return "🆕"
-    elif pct < 25:
-        return "🚀"
-    elif pct < 50:
-        return "⏳"
-    elif pct < 75:
-        return "🔥"
-    elif pct < 90:
-        return "⚡"
-    elif pct < 100:
-        return "🏁"
-    else:
-        return "✅"
 
 
 def _format_size(size_bytes: int) -> str:
@@ -127,6 +112,8 @@ def _format_size(size_bytes: int) -> str:
 
 
 def _format_time(seconds: float) -> str:
+    if seconds <= 0:
+        return "calculating..."
     if seconds < 60:
         return f"{int(seconds)}s"
     elif seconds < 3600:
@@ -154,10 +141,9 @@ class DownloadProgressTracker:
         self.start_time = start_time
         self.downloaded = 0
         self.last_update_time = start_time
-        self.last_update_downloaded = 0
+        self.last_update_bytes = 0
         self.current_speed = 0.0
         self.eta_seconds = 0.0
-        self.last_reported_pct = -1.0
         self.last_reported_time = 0.0
     
     def update(self, downloaded: int) -> dict:
@@ -165,24 +151,20 @@ class DownloadProgressTracker:
         self.downloaded = downloaded
         
         time_delta = now - self.last_update_time
-        if time_delta > 0:
-            bytes_delta = downloaded - self.last_update_downloaded
+        if time_delta >= 1.0:
+            bytes_delta = downloaded - self.last_update_bytes
             self.current_speed = bytes_delta / time_delta
-        
-        if self.current_speed > 0 and self.total_size > 0:
-            remaining = self.total_size - downloaded
-            self.eta_seconds = remaining / self.current_speed
-        else:
-            self.eta_seconds = 0
-        
-        self.last_update_time = now
-        self.last_update_downloaded = downloaded
+            self.last_update_time = now
+            self.last_update_bytes = downloaded
+            if self.current_speed > 0 and self.total_size > 0:
+                remaining = max(0, self.total_size - downloaded)
+                self.eta_seconds = remaining / self.current_speed
         
         pct = (downloaded / self.total_size * 100) if self.total_size > 0 else 0
         elapsed = now - self.start_time
         
         return {
-            "pct": pct,
+            "pct": min(100.0, pct),
             "downloaded": downloaded,
             "total": self.total_size,
             "speed": self.current_speed,
@@ -192,40 +174,27 @@ class DownloadProgressTracker:
     
     def should_update_ui(self, pct: float) -> bool:
         now = time.time()
-        time_since_last = now - self.last_reported_time
-        pct_change = abs(pct - self.last_reported_pct)
-        
-        if time_since_last >= PROGRESS_UPDATE_INTERVAL or pct_change >= PROGRESS_MIN_PERCENT_STEP:
-            self.last_reported_pct = pct
+        if (now - self.last_reported_time) >= PROGRESS_UPDATE_INTERVAL:
             self.last_reported_time = now
             return True
         return False
     
     def format_message(self, stats: dict, title: str = "Downloading...", slug: str = "") -> str:
         pct = stats["pct"]
-        emoji = _get_progress_emoji(pct)
         bar = _progress_bar_detailed(pct)
         speed = _format_speed(stats["speed"])
-        eta = _format_time(stats["eta"]) if stats["eta"] > 0 else "calculating..."
-        elapsed = _format_time(stats["elapsed"])
+        eta = _format_time(stats["eta"])
         downloaded = _format_size(stats["downloaded"])
         total = _format_size(stats["total"]) if stats["total"] > 0 else "unknown"
         
-        # Build status line with emoji
-        status_line = f"{emoji} {title}"
-        
-        # Build progress details
-        msg = (
-            f"{status_line}\n\n"
+        return (
+            f"📥 **{title}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"{bar}\n\n"
-            f"📦 Size: {downloaded} / {total}\n"
-            f"⚡ Speed: {speed}\n"
-            f"⏱ Elapsed: {elapsed}\n"
-            f"⏳ ETA: {eta}"
+            f"📊 **Size:** {downloaded} / {total}\n"
+            f"⚡ **Speed:** {speed}\n"
+            f"⏳ **ETA:** {eta}"
         )
-        if slug:
-            msg += f"\n📄 File: {slug}.mp4"
-        return msg
 
 
 class UploadProgressTracker:
@@ -234,10 +203,9 @@ class UploadProgressTracker:
         self.start_time = start_time
         self.uploaded = 0
         self.last_update_time = start_time
-        self.last_update_uploaded = 0
+        self.last_update_bytes = 0
         self.current_speed = 0.0
         self.eta_seconds = 0.0
-        self.last_reported_pct = -1.0
         self.last_reported_time = 0.0
     
     def update(self, current: int, total: int) -> dict:
@@ -246,24 +214,20 @@ class UploadProgressTracker:
         self.total_size = total
         
         time_delta = now - self.last_update_time
-        if time_delta > 0:
-            bytes_delta = current - self.last_update_uploaded
+        if time_delta >= 1.0:
+            bytes_delta = current - self.last_update_bytes
             self.current_speed = bytes_delta / time_delta
-        
-        if self.current_speed > 0 and total > 0:
-            remaining = total - current
-            self.eta_seconds = remaining / self.current_speed
-        else:
-            self.eta_seconds = 0
-        
-        self.last_update_time = now
-        self.last_update_uploaded = current
+            self.last_update_time = now
+            self.last_update_bytes = current
+            if self.current_speed > 0 and total > 0:
+                remaining = max(0, total - current)
+                self.eta_seconds = remaining / self.current_speed
         
         pct = (current / total * 100) if total > 0 else 0
         elapsed = now - self.start_time
         
         return {
-            "pct": pct,
+            "pct": min(100.0, pct),
             "uploaded": current,
             "total": total,
             "speed": self.current_speed,
@@ -273,42 +237,27 @@ class UploadProgressTracker:
     
     def should_update_ui(self, pct: float) -> bool:
         now = time.time()
-        time_since_last = now - self.last_reported_time
-        pct_change = abs(pct - self.last_reported_pct)
-        
-        if time_since_last >= PROGRESS_UPDATE_INTERVAL or pct_change >= PROGRESS_MIN_PERCENT_STEP:
-            self.last_reported_pct = pct
+        if (now - self.last_reported_time) >= PROGRESS_UPDATE_INTERVAL:
             self.last_reported_time = now
             return True
         return False
     
     def format_message(self, stats: dict, slug: str = "") -> str:
         pct = stats["pct"]
-        emoji = _get_progress_emoji(pct)
         bar = _progress_bar_detailed(pct)
         speed = _format_speed(stats["speed"])
-        eta = _format_time(stats["eta"]) if stats["eta"] > 0 else "calculating..."
-        elapsed = _format_time(stats["elapsed"])
+        eta = _format_time(stats["eta"])
         uploaded = _format_size(stats["uploaded"])
         total = _format_size(stats["total"]) if stats["total"] > 0 else "unknown"
         
-        # Build status line with emoji
-        status_line = f"{emoji} Uploading..."
-        
-        msg = (
-            f"{status_line}\n\n"
+        return (
+            f"📤 **Uploading to Telegram...**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"{bar}\n\n"
-            f"📦 Size: {uploaded} / {total}\n"
-            f"⚡ Speed: {speed}\n"
-            f"⏱ Elapsed: {elapsed}\n"
-            f"⏳ ETA: {eta}"
+            f"📊 **Size:** {uploaded} / {total}\n"
+            f"⚡ **Speed:** {speed}\n"
+            f"⏳ **ETA:** {eta}"
         )
-        if slug:
-            msg += f"\n📄 File: {slug}.mp4"
-        return msg
-
-
-ACTIVE_DOWNLOADS = {}
 
 
 async def cancel_download_callback(client: Client, callback_query: CallbackQuery):
@@ -316,12 +265,22 @@ async def cancel_download_callback(client: Client, callback_query: CallbackQuery
     if chat_id in ACTIVE_DOWNLOADS:
         dl_info = ACTIVE_DOWNLOADS[chat_id]
         dl_info["cancelled"] = True
+        session = dl_info.get("session")
+        if session and not session.closed:
+            try:
+                await session.close()
+            except Exception:
+                pass
         proc = dl_info.get("process")
         if proc:
             try:
                 proc.kill()
             except Exception:
                 pass
+        task = dl_info.get("task")
+        if task and not task.done():
+            task.cancel()
+            
         filename = dl_info.get("filename")
         if filename and os.path.exists(filename):
             try:
@@ -330,14 +289,20 @@ async def cancel_download_callback(client: Client, callback_query: CallbackQuery
                 pass
         slug = dl_info.get("slug", "")
         ACTIVE_DOWNLOADS.pop(chat_id, None)
-        await callback_query.answer("🛑 Download cancelled!", show_alert=True)
+        try:
+            await callback_query.answer("🛑 Download cancelled!", show_alert=True)
+        except Exception:
+            pass
         await _safe_edit(
             callback_query,
             f"🛑 **Download Cancelled**\n\n"
-            f"Download of **{slug}** was stopped by user."
+            f"Download was stopped by user."
         )
     else:
-        await callback_query.answer("No active download to cancel.", show_alert=True)
+        try:
+            await callback_query.answer("No active download to cancel.", show_alert=True)
+        except Exception:
+            pass
 
 
 async def _safe_edit(callback_query: CallbackQuery, text: str, reply_markup=None):
@@ -347,7 +312,7 @@ async def _safe_edit(callback_query: CallbackQuery, text: str, reply_markup=None
         pass
 
 
-async def _download_direct(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
+async def _download_direct(url: str, filename: str, progress_cb=None, referer: str = "", chat_id: int = 0) -> bool:
     try:
         if not referer:
             if "oppai.stream" in url or "myspacecat.pictures" in url:
@@ -366,9 +331,14 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
             headers["Origin"] = referer.rstrip("/")
 
         async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers) as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
+            if chat_id and chat_id in ACTIVE_DOWNLOADS:
+                ACTIVE_DOWNLOADS[chat_id]["session"] = session
 
+            async with session.get(url) as resp:
+                if chat_id and chat_id in ACTIVE_DOWNLOADS:
+                    ACTIVE_DOWNLOADS[chat_id]["response"] = resp
+                
+                resp.raise_for_status()
                 ct = resp.content_type or ""
                 if "text/html" in ct or "application/json" in ct:
                     log.error("URL returned %s instead of video: %s", ct, url)
@@ -380,11 +350,13 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
 
                 downloaded = 0
                 start_time = time.time()
-                # Create tracker with total size for proper progress calculation
-                tracker = DownloadProgressTracker(total if total > 0 else 100_000_000, start_time)
+                tracker = DownloadProgressTracker(total if total > 0 else 0, start_time)
 
                 with open(filename, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(256 * 1024):
+                    async for chunk in resp.content.iter_chunked(512 * 1024):
+                        if chat_id and ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+                            log.info("Download cancelled for chat %s", chat_id)
+                            return False
                         f.write(chunk)
                         downloaded += len(chunk)
 
@@ -397,288 +369,174 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
                     stats = tracker.update(downloaded)
                     await progress_cb(stats)
 
+        if not os.path.exists(filename):
+            return False
         file_size = os.path.getsize(filename)
         if file_size < 50_000:
             log.error("Downloaded file too small (%d bytes), likely not a video: %s", file_size, url)
-            os.remove(filename)
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
             return False
 
-        log.info("Download complete: %s (%s)", filename, _format_size(file_size))
         return True
-    except asyncio.TimeoutError:
-        log.error("Direct download timed out for url=%s", url)
+    except asyncio.CancelledError:
+        log.info("Direct download cancelled")
         return False
-    except Exception:
-        log.exception("Direct download failed for url=%s", url)
+    except Exception as e:
+        log.error("Direct download failed for url=%s: %s", url[:80], e)
         return False
 
 
 async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
-    if not os.path.exists(N_M3U8DL_RE):
-        log.warning("N_m3u8DL-RE binary not found at %s", N_M3U8DL_RE)
+    if not os.path.isfile(N_M3U8DL_RE) or not os.access(N_M3U8DL_RE, os.X_OK):
         return False
 
-    ref = referer or ("https://oppai.stream/" if "oppai" in url else "https://hentai.tv/")
+    out_name = Path(filename).stem
+    save_dir = Path(filename).parent.resolve()
+
+    cmd = [
+        N_M3U8DL_RE,
+        url,
+        "--save-dir", str(save_dir),
+        "--save-name", out_name,
+        "--auto-select",
+        "--binary-merge",
+        "--log-level", "INFO",
+    ]
+    if referer:
+        cmd.extend(["--header", f"Referer: {referer}"])
+
     try:
-        try:
-            os.chmod(N_M3U8DL_RE, 0o755)
-        except Exception:
-            pass
-        start_time = time.time()
-        
-        process = await asyncio.create_subprocess_exec(
-            N_M3U8DL_RE,
-            url,
-            "--save-name", Path(filename).stem,
-            "--save-dir", ".",
-            "--thread-count", "8",
-            "--download-retry-count", "3",
-            "--tmp-dir", "/tmp",
-            "--no-log",
-            "--auto-select",
-            "-H", f"Referer: {ref}",
-            "-H", f"Origin: {ref.rstrip('/')}",
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
-        for dl in ACTIVE_DOWNLOADS.values():
-            dl["process"] = process
-
-        if progress_cb:
-            expected_duration = 90
-            tracker = DownloadProgressTracker(100, start_time)
-            
-            async def monitor_progress():
-                while process.returncode is None:
-                    await asyncio.sleep(2)
-                    elapsed = time.time() - start_time
-                    estimated_pct = min(95, (elapsed / expected_duration) * 100)
-                    stats = tracker.update(int(estimated_pct))
-                    stats["pct"] = estimated_pct
-                    stats["downloaded"] = int(estimated_pct)
-                    stats["total"] = 100
-                    stats["speed"] = 0
-                    stats["eta"] = max(0, expected_duration - elapsed)
-                    if tracker.should_update_ui(estimated_pct):
-                        await progress_cb(stats)
-            
-            monitor_task = asyncio.create_task(monitor_progress())
-        
-        try:
-            _, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=N_M3U8DL_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            log.error("N_m3u8DL-RE timed out for %s, killing process", url)
-            process.kill()
-            await process.wait()
-            return False
-        finally:
-            if progress_cb:
-                monitor_task.cancel()
-                try:
-                    await monitor_task
-                except asyncio.CancelledError:
-                    pass
-
-        if process.returncode != 0:
-            log.error("N_m3u8DL-RE failed (rc=%d): %s", process.returncode, stderr.decode(errors="replace")[-500:])
-            return False
-
-        stem = Path(filename).stem
-        for ext in [".mp4", ".mkv", ".ts"]:
-            candidate = stem + ext
-            if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
-                if candidate != filename:
-                    os.rename(candidate, filename)
-                return True
-
-        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-            return True
-
-        log.error("N_m3u8DL-RE completed but output file not found for %s", url)
-        return False
-
+        await asyncio.wait_for(proc.communicate(), timeout=N_M3U8DL_TIMEOUT)
+        return os.path.exists(filename) and os.path.getsize(filename) > 50_000
     except Exception:
-        log.exception("N_m3u8DL-RE download failed for url=%s", url)
         return False
 
 
 async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
+    cmd = [
+        "ffmpeg", "-y",
+        "-headers", f"Referer: {referer}\r\nUser-Agent: Mozilla/5.0\r\n" if referer else "User-Agent: Mozilla/5.0\r\n",
+        "-i", url,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        filename,
+    ]
     try:
-        ref = referer or ("https://oppai.stream/" if "oppai" in url else "https://hentai.tv/")
-        start_time = time.time()
-        
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-headers", f"Referer: {ref}\r\nOrigin: {ref.rstrip('/')}\r\n",
-            "-i", url,
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            "-movflags", "+faststart",
-            filename,
-            stdout=asyncio.subprocess.DEVNULL,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        for dl in ACTIVE_DOWNLOADS.values():
-            dl["process"] = process
-
-        if progress_cb:
-            expected_duration = 120
-            tracker = DownloadProgressTracker(100, start_time)
-            
-            async def monitor_progress():
-                while process.returncode is None:
-                    await asyncio.sleep(2)
-                    elapsed = time.time() - start_time
-                    estimated_pct = min(95, (elapsed / expected_duration) * 100)
-                    stats = tracker.update(int(estimated_pct))
-                    stats["pct"] = estimated_pct
-                    stats["downloaded"] = int(estimated_pct)
-                    stats["total"] = 100
-                    stats["speed"] = 0
-                    stats["eta"] = max(0, expected_duration - elapsed)
-                    if tracker.should_update_ui(estimated_pct):
-                        await progress_cb(stats)
-            
-            monitor_task = asyncio.create_task(monitor_progress())
-        
-        try:
-            _, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=FFMPEG_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            log.error("ffmpeg timed out for %s, killing process", url)
-            process.kill()
-            await process.wait()
-            return False
-        finally:
-            if progress_cb:
-                monitor_task.cancel()
-                try:
-                    await monitor_task
-                except asyncio.CancelledError:
-                    pass
-
-        if process.returncode != 0:
-            log.error("ffmpeg failed: %s", stderr.decode(errors="replace")[-500:])
-            return False
-        return True
-
+        await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT)
+        return os.path.exists(filename) and os.path.getsize(filename) > 50_000
     except Exception:
-        log.exception("ffmpeg download failed for url=%s", url)
         return False
 
 
 def _extract_series_name(slug: str) -> str:
-    parts = slug.rsplit("-", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        return parts[0]
-    return slug
+    s = slug.replace("htv__", "").replace("oppai__", "")
+    s = re.sub(r"-episode-\d+$", "", s, flags=re.I)
+    s = re.sub(r"[-_]\d+$", "", s)
+    return s.replace("-", " ").strip().title()
 
 
+@approved_only
+@force_sub
 async def hentaidl(client: Client, callback_query: CallbackQuery):
-    """Download the video directly via Pixeldrain (dlt_<slug>)."""
-    log.info("=== DOWNLOAD HANDLER === data=%s user=%s",
-             callback_query.data, callback_query.from_user.id)
+    """Download video with quality selection support."""
+    raw_data = callback_query.data.split("_", 1)[1]
+    target_quality = None
+    if raw_data.endswith("_4k"):
+        target_quality = "4k"
+        raw_slug = raw_data[:-3]
+    elif raw_data.endswith("_1080"):
+        target_quality = "1080"
+        raw_slug = raw_data[:-5]
+    elif raw_data.endswith("_720"):
+        target_quality = "720"
+        raw_slug = raw_data[:-4]
+    elif raw_data.endswith("_best"):
+        target_quality = "best"
+        raw_slug = raw_data[:-5]
+    else:
+        raw_slug = raw_data
 
-    from utils.auth import is_approved
-    user_id = callback_query.from_user.id
-    if not await is_approved(user_id):
-        await callback_query.answer("No access.", show_alert=True)
-        return
-
-    raw_slug = callback_query.data.split("_", 1)[1]
     slug = await resolve_slug(raw_slug)
     chat_id = callback_query.from_user.id
     username = callback_query.from_user.username
+    log.info("=== DOWNLOAD HANDLER === slug=%s quality=%s user=%s", slug, target_quality, chat_id)
+
+    # Check cache
     db = get_db()
+    cache_key = f"{slug}_{target_quality}" if target_quality else slug
+    cached = await db.Name.find_one({"name": cache_key}) or await db.Name.find_one({"name": slug})
+
+    if cached and cached.get("file_size", 0) > 50_000:
+        thumb_path = None
+        try:
+            info_c = await asyncio.to_thread(hanime_api.details, slug)
+            thumb_url = info_c.get("poster_url") or info_c.get("cover_url") or ""
+            if thumb_url:
+                thumb_path = await download_thumbnail(thumb_url)
+        except Exception:
+            pass
+
+        try:
+            sent = await client.send_document(
+                chat_id=chat_id,
+                document=cached["file_id"],
+                caption=f"🎬 **{info_c.get('title') or slug}**\n💾 *Served from cache*\n\nDownloaded via @hentai_dl_bot",
+                thumb=thumb_path,
+            )
+            await track_message(chat_id, sent.id)
+            await _safe_edit(
+                callback_query,
+                f"✅ **Sent from Cache!**\n\n"
+                f"📄 {slug}\n"
+                f"Auto-deletes in 10 minutes."
+            )
+            return
+        except Exception:
+            await db.Name.delete_one({"name": cache_key})
+        finally:
+            if thumb_path and os.path.exists(thumb_path):
+                try:
+                    os.unlink(thumb_path)
+                except OSError:
+                    pass
 
     start_time = time.time()
-
-    # Clear old messages before starting download
-    await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
-
-    # ── CHECK CACHE FIRST ─────────────────────────────────────────
-    cached = await db.Name.find_one({"name": slug})
-    if cached and cached.get("file_size", 0) > 50_000:
-        file_id = cached.get("file_id")
-        if file_id:
-            log.info("Cache hit for %s — sending existing file", slug)
-            thumb_path = None
-            try:
-                info = await asyncio.to_thread(hanime_api.details, slug)
-                tags_str = ", ".join(info.get("tags", [])[:5])
-                caption = (
-                    f"{info['name']}\n"
-                    f"Tags: {tags_str}\n"
-                    f"📦 Already downloaded!\n"
-                    f"Downloaded via @hanime_dl_bot"
-                )
-                thumb_url = info.get("poster_url") or info.get("cover_url") or ""
-                if thumb_url:
-                    thumb_path = await download_thumbnail(thumb_url)
-            except Exception:
-                caption = f"{slug}\n📦 Already downloaded!\nDownloaded via @hanime_dl_bot"
-            
-            try:
-                sent = await client.send_document(
-                    chat_id=chat_id,
-                    document=file_id,
-                    caption=caption,
-                    thumb=thumb_path,
-                )
-                await track_message(chat_id, sent.id)
-                await _safe_edit(
-                    callback_query,
-                    f"✅ **Already Downloaded!**\n\n"
-                    f"📄 {slug}\n"
-                    f"💾 File sent from cache.\n\n"
-                    f"Auto-deletes in 10 minutes. Save it!"
-                )
-                return
-            except Exception:
-                log.warning("Cache send failed for %s, will re-download", slug)
-                await db.Name.delete_one({"name": slug})
-            finally:
-                if thumb_path and os.path.exists(thumb_path):
-                    try:
-                        os.unlink(thumb_path)
-                    except OSError:
-                        pass
-
-    await _safe_edit(callback_query, f"🚀 **Preparing Download**\n\n{_progress_bar(0)}\n\n⏳ Please wait...")
-
-    log_msg_id = await log_download_start(client, username, slug)
+    await _safe_edit(callback_query, f"🚀 **Preparing Download**\n\n[{'░'*12}] 0.0%\n\n⏳ Resolving video stream...")
 
     # Fetch streams
     try:
-        data = await asyncio.to_thread(hanime_api.get_streams, slug)
+        data = await asyncio.to_thread(hanime_api.get_streams, slug, target_quality)
     except Exception:
         log.exception("Failed to fetch streams for slug=%s", slug)
-        await _safe_edit(callback_query, "API unavailable. Please try again later.")
-        await log_error(client, username, f"Stream fetch failed for {slug}")
+        await _safe_edit(callback_query, "❌ API unavailable. Please try again later.")
         return
 
     dl_url = data.get("dl_url", "")
     streams = data.get("streams", [])
-    sources = data.get("sources", [])
-
-    log.info("Sources for %s: dl_url=%s, streams=%d, sources=%d",
-             slug, dl_url[:60] if dl_url else None, len(streams), len(sources))
 
     if not dl_url and not streams:
-        elapsed = int(time.time() - start_time)
+        is_oppai = "oppai" in slug
+        extra = "\n\n💡 *If this title is on Oppai, it may require `/oppai_login`.*" if is_oppai else ""
         await _safe_edit(
             callback_query,
-            "❌ **No Download Sources Available**\n\n"
-            "This title may be region-locked or not yet available for download.\n"
-            "Try another episode or title."
+            f"❌ **No Download Stream Available**\n\n"
+            f"The server returned no stream for **{slug}**.{extra}"
         )
-        await log_error(client, username, f"No sources/dl_url for {slug}")
         return
 
-    # Determine file extension and referer
     primary_stream = streams[0] if streams else {}
     ext = primary_stream.get("extension") or ("webm" if dl_url.endswith(".webm") else "mp4")
     referer = primary_stream.get("referer", "")
@@ -693,24 +551,22 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         "task": asyncio.current_task(),
         "slug": slug,
         "cancelled": False,
-        "process": None,
         "filename": filename,
+        "session": None,
+        "response": None,
     }
 
     try:
         downloaded = False
         active_stream_label = quality_label
 
-        # Progress callback with detailed stats
         async def on_progress(stats):
             if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
-                raise asyncio.CancelledError("Download cancelled by user")
-            msg = tracker.format_message(stats, title=f"Downloading [{active_stream_label}]...", slug=slug)
+                raise asyncio.CancelledError("Cancelled by user")
+            msg = tracker.format_message(stats, title=f"Downloading [{active_stream_label}]", slug=slug)
             await _safe_edit(callback_query, msg, reply_markup=cancel_keyboard)
-            if log_msg_id:
-                await log_download_progress(client, log_msg_id, username, slug, stats["pct"])
 
-        # Build candidate streams list (trying best qualities first)
+        # Build stream candidate list
         candidate_urls = []
         if dl_url:
             candidate_urls.append({
@@ -734,25 +590,24 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             c_ext = candidate.get("extension", "mp4")
             active_stream_label = c_label
             
-            # Adjust filename extension if needed
             if c_ext and filename.rsplit(".", 1)[-1] != c_ext:
                 filename = f"{slug}.{c_ext}"
                 if chat_id in ACTIVE_DOWNLOADS:
                     ACTIVE_DOWNLOADS[chat_id]["filename"] = filename
 
             if not c_url.endswith(".m3u8") and c_kind != "hls":
-                log.info("Attempting direct download for %s: %s", slug, c_url[:80])
+                log.info("Trying direct download for %s: %s", slug, c_url[:80])
                 tracker = DownloadProgressTracker(0, start_time)
-                downloaded = await _download_direct(c_url, filename, on_progress, referer=c_ref)
+                downloaded = await _download_direct(c_url, filename, on_progress, referer=c_ref, chat_id=chat_id)
             elif ".m3u8" in c_url or c_kind == "hls":
-                log.info("Attempting HLS download for %s: %s", slug, c_url[:80])
+                log.info("Trying HLS download for %s: %s", slug, c_url[:80])
                 tracker = DownloadProgressTracker(0, start_time)
                 downloaded = await _download_n_m3u8dl(c_url, filename, on_progress, referer=c_ref)
                 if not downloaded:
                     downloaded = await _download_hls_ffmpeg(c_url, filename, on_progress, referer=c_ref)
 
             if downloaded and os.path.exists(filename) and os.path.getsize(filename) > 50_000:
-                log.info("Successfully downloaded candidate stream %s for %s", c_label, slug)
+                log.info("Download completed successfully: %s (%s)", filename, c_label)
                 break
             else:
                 downloaded = False
@@ -762,40 +617,34 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                     except OSError:
                         pass
 
-        # Failed
         if not downloaded:
             if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 return
             elapsed = int(time.time() - start_time)
-            is_oppai = "oppai" in slug or any("oppai" in s.get("referer", "") for s in streams)
-            err_extra = "\n\n💡 *Note: Some 18+ titles on Oppai require an account. Use `/oppai_login <username> <password>` to unlock.*" if is_oppai else ""
+            is_oppai = "oppai" in slug
+            err_extra = "\n\n💡 *Note: If this title requires an account, use `/oppai_login`.*" if is_oppai else ""
             await _safe_edit(
                 callback_query,
                 f"❌ **Download Unavailable**\n\n"
-                f"Could not download **{slug}** (stream server rejected or requires login).{err_extra}\n\n"
-                f"Try another episode or title."
+                f"Could not download **{slug}** ({quality_label}) after {elapsed}s.{err_extra}\n\n"
+                f"Please try another quality or episode."
             )
-            await log_error(client, username, f"All download strategies failed for {slug}")
-            if os.path.exists(filename):
-                os.remove(filename)
             return
     finally:
         ACTIVE_DOWNLOADS.pop(chat_id, None)
 
-    if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-        await _safe_edit(callback_query, "Download produced an empty file.")
-        await log_error(client, username, f"Empty file for {slug}")
+    if not os.path.exists(filename) or os.path.getsize(filename) < 50_000:
+        await _safe_edit(callback_query, "❌ Download produced an empty or corrupted file.")
         if os.path.exists(filename):
-            os.remove(filename)
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
         return
 
-    # Upload with progress
+    # Upload Phase with strict 3.5s rate limiting
     try:
         file_size = os.path.getsize(filename)
-        file_size_mb = file_size / (1024 * 1024)
-        elapsed = int(time.time() - start_time)
-        
-        # Create upload progress tracker
         upload_tracker = UploadProgressTracker(file_size, time.time())
         
         async def upload_progress(current, total):
@@ -803,140 +652,114 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             if upload_tracker.should_update_ui(stats["pct"]):
                 msg = upload_tracker.format_message(stats, slug=slug)
                 await _safe_edit(callback_query, msg)
-                if log_msg_id:
-                    await log_download_progress(client, log_msg_id, username, slug, 90 + stats["pct"] * 0.1)
 
         await _safe_edit(
             callback_query,
-            f"Uploading... ({file_size_mb:.1f} MB)\n"
-            f"Downloaded in {elapsed}s"
+            f"📤 **Uploading to Telegram...**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"[{'█'*6}{'░'*6}] 50.0%\n\n"
+            f"📊 **Size:** {_format_size(file_size)}\n"
+            f"✨ **Quality:** {quality_label}"
         )
-        if log_msg_id:
-            await log_download_progress(client, log_msg_id, username, slug, 90)
 
-        # Get video details + episode thumbnail
         info = None
         thumb_path = None
         try:
             info = await asyncio.to_thread(hanime_api.details, slug)
             series_name = _extract_series_name(slug)
             tags_str = ", ".join(info.get("tags", [])[:5])
-            brand = info.get("brand") or ("oppai.stream (4K)" if "4K" in quality_label else "hentai.tv")
+            brand = info.get("brand") or ("oppai.stream (4K)" if "4k" in quality_label.lower() else "hentai.tv")
             caption = (
-                f"🎬 **{info.get('title') or info.get('name') or slug}**\n\n"
+                f"🎬 **{info.get('title') or slug}**\n\n"
                 f"✨ **Quality:** {quality_label}\n"
                 f"🌐 **Source:** {brand}\n"
                 f"🔖 **Tags:** {tags_str}\n\n"
                 f"Downloaded via @hentai_dl_bot"
             )
-            # Episode thumbnail
             thumb_url = info.get("poster_url") or info.get("cover_url") or ""
             if thumb_url:
                 thumb_path = await download_thumbnail(thumb_url)
         except Exception:
             series_name = _extract_series_name(slug)
-            caption = f"{slug}\nDownloaded via @hanime_dl_bot"
-        
-        # Send to user with progress callback + thumbnail
-        try:
-            sent = await client.send_document(
-                chat_id=chat_id,
-                document=filename,
-                caption=caption,
-                thumb=thumb_path,
-                progress=upload_progress,
-            )
-        finally:
-            if thumb_path and os.path.exists(thumb_path):
-                try:
-                    os.unlink(thumb_path)
-                except OSError:
-                    pass
-        await track_message(chat_id, sent.id)
+            caption = f"🎬 **{slug}**\nDownloaded via @hentai_dl_bot"
 
+        sent = await client.send_document(
+            chat_id=chat_id,
+            document=filename,
+            caption=caption,
+            progress=upload_progress,
+            thumb=thumb_path,
+        )
+
+        await track_message(chat_id, sent.id)
         file_id = sent.document.file_id
-        total_time = int(time.time() - start_time)
+
+        # Cache file in DB
+        await db.Name.update_one(
+            {"name": cache_key},
+            {"$set": {"name": cache_key, "file_id": file_id, "file_size": file_size, "slug": slug, "quality": quality_label}},
+            upsert=True,
+        )
 
         await _safe_edit(
             callback_query,
             f"✅ **Download Complete!**\n\n"
-            f"📦 Size: {file_size_mb:.1f} MB\n"
-            f"⏱ Total Time: {total_time}s\n\n"
-            f"💾 Auto-deletes in 10 minutes. Save it!"
+            f"🎬 **{info.get('title') if info else slug}**\n"
+            f"✨ **Quality:** {quality_label}\n"
+            f"📊 **Size:** {_format_size(file_size)}\n\n"
+            f"Auto-deletes in 10 minutes. Save it to your saved messages!"
         )
 
-        # Save to MongoDB cache
-        await db.Name.update_one(
-            {"name": slug},
-            {"$set": {"name": slug, "file_id": file_id, "file_size": sent.document.file_size}},
-            upsert=True,
-        )
-
-        # Update series catalog with poster
+        # Update catalog channel
         try:
-            # Get poster URL with fallback to cover_url
-            poster_url = ""
-            if info:
-                poster_url = info.get("cover_url", "") or info.get("poster_url", "") or info.get("cover", "")
-            
-            log.info("Updating catalog for %s with poster_url=%s", slug, poster_url[:60] if poster_url else "None")
-            
+            poster_url = info.get("cover_url", "") or info.get("poster_url", "") if info else ""
             await update_catalog(
                 client=client,
                 slug=slug,
-                file_id=file_id,
-                file_size=sent.document.file_size,
-                series_name=info.get("name", "") if info else "",
+                series_name=series_name,
                 poster_url=poster_url,
-                tags=info.get("tags", []) if info else [],
+                caption=caption,
+                file_id=file_id,
+                thumb_path=thumb_path,
             )
-        except Exception:
-            log.exception("Failed to update catalog for %s", slug)
+        except Exception as e:
+            log.warning("Catalog update failed: %s", e)
 
-        await log_upload_complete(client, log_msg_id, slug, file_id)
-
-    except Exception:
-        log.exception("Upload failed for %s", slug)
-        await _safe_edit(callback_query, "Something went wrong during upload.")
-        await log_error(client, username, f"Upload failed for {slug}")
+    except Exception as e:
+        log.exception("Upload failed for %s: %s", slug, e)
+        await _safe_edit(callback_query, "❌ Upload to Telegram failed. Please try again.")
     finally:
+        if thumb_path and os.path.exists(thumb_path):
+            try:
+                os.unlink(thumb_path)
+            except OSError:
+                pass
         if os.path.exists(filename):
-            os.remove(filename)
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
 
 
+@approved_only
+@force_sub
 async def batch_download(client: Client, callback_query: CallbackQuery):
-    """Download all episodes of a series (ball_<slug> callback)."""
+    """Batch download all episodes of a series."""
     raw_slug = callback_query.data.split("_", 1)[1]
     slug = await resolve_slug(raw_slug)
     chat_id = callback_query.from_user.id
-    username = callback_query.from_user.username
-
     log.info("=== BATCH DOWNLOAD === slug=%s user=%s", slug, chat_id)
 
-    from utils.auth import is_approved
-    if not await is_approved(chat_id):
-        await callback_query.answer("No access.", show_alert=True)
-        return
-
-    # Clear old messages before starting batch
-    await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
-
-    try:
-        await callback_query.answer("Starting batch download...")
-    except Exception:
-        pass
-
-    # Get episode list
     try:
         info = await asyncio.to_thread(hanime_api.details, slug)
     except Exception:
-        log.exception("Failed to get details for batch %s", slug)
-        await callback_query.answer("API error", show_alert=True)
+        await _safe_edit(callback_query, "❌ Failed to fetch series info for batch download.")
         return
 
     episodes = info.get("episodes", [])
     if not episodes:
-        episodes = [{"slug": slug, "name": info["name"]}]
+        await _safe_edit(callback_query, "❌ No episodes found to batch download.")
+        return
 
     total = len(episodes)
     succeeded = 0
@@ -946,7 +769,6 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         chat_id=chat_id,
         text=f"📥 **Batch Download Started**\n\n📺 Episodes: {total}\n✅ Progress: 0/{total}\n\n⏳ Starting...",
     )
-
     db = get_db()
 
     for i, ep in enumerate(episodes):
@@ -955,11 +777,12 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         if not ep_slug:
             continue
 
+        pct = (i / total) * 100
+        bar = _progress_bar_detailed(pct)
         try:
-            progress_pct = ((i + 1) / total * 100) if total > 0 else 0
-            bar = _progress_bar(progress_pct)
             await status_msg.edit_text(
-                f"📥 **Batch Download**\n\n"
+                f"📥 **Batch Download**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{bar}\n\n"
                 f"📺 Downloading: {ep_name}\n"
                 f"📊 Progress: {i + 1}/{total}\n"
@@ -971,37 +794,21 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         # Check cache
         cached = await db.Name.find_one({"name": ep_slug})
         if cached and cached.get("file_size", 0) > 50_000:
-            ep_thumb = None
-            try:
-                ep_info_c = await asyncio.to_thread(hanime_api.details, ep_slug)
-                thumb_url = ep_info_c.get("poster_url") or ep_info_c.get("cover_url") or ""
-                if thumb_url:
-                    ep_thumb = await download_thumbnail(thumb_url)
-            except Exception:
-                pass
             try:
                 await client.send_document(
                     chat_id=chat_id,
                     document=cached["file_id"],
-                    caption=f"{ep_name}\nDownloaded via @hanime_dl_bot",
-                    thumb=ep_thumb,
+                    caption=f"🎬 **{ep_name}**\n💾 *Served from cache*\n\nDownloaded via @hentai_dl_bot",
                 )
                 succeeded += 1
                 continue
             except Exception:
                 await db.Name.delete_one({"name": ep_slug})
-            finally:
-                if ep_thumb and os.path.exists(ep_thumb):
-                    try:
-                        os.unlink(ep_thumb)
-                    except OSError:
-                        pass
 
-        # Fresh download with progress
+        # Fresh download
         try:
             data = await asyncio.to_thread(hanime_api.get_streams, ep_slug)
         except Exception:
-            log.error("Batch: stream fetch failed for %s", ep_slug)
             failed += 1
             continue
 
@@ -1013,141 +820,59 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         quality_label = primary_stream.get("label", "1080p")
         filename = f"{ep_slug}.{ext}"
         downloaded = False
-        
-        # Progress callback for batch downloads
-        async def batch_progress(stats):
-            try:
-                bar = _progress_bar(stats["pct"])
-                await status_msg.edit_text(
-                    f"📥 **Batch Download**\n\n"
-                    f"{bar}\n\n"
-                    f"📺 Downloading: {ep_name} [{quality_label}]\n"
-                    f"📊 Progress: {i + 1}/{total}\n"
-                    f"✅ Done: {succeeded} | ❌ Failed: {failed}\n\n"
-                    f"⚡ Speed: {_format_speed(stats['speed'])} | ⏳ ETA: {_format_time(stats['eta'])}"
-                )
-            except Exception:
-                pass
 
-        candidate_urls = []
-        if dl_url:
-            candidate_urls.append({"url": dl_url, "referer": referer, "kind": primary_stream.get("kind", ""), "extension": ext})
-        for s in streams:
-            if s.get("url") and not any(c["url"] == s["url"] for c in candidate_urls):
-                candidate_urls.append(s)
-
-        for candidate in candidate_urls:
-            c_url = candidate.get("url", "")
-            if not c_url:
-                continue
-            c_ref = candidate.get("referer", referer)
-            c_kind = candidate.get("kind", "")
-            c_ext = candidate.get("extension", "mp4")
-            if c_ext and filename.rsplit(".", 1)[-1] != c_ext:
-                filename = f"{ep_slug}.{c_ext}"
-
-            if not c_url.endswith(".m3u8") and c_kind != "hls":
-                downloaded = await _download_direct(c_url, filename, batch_progress, referer=c_ref)
-            elif ".m3u8" in c_url or c_kind == "hls":
-                downloaded = await _download_n_m3u8dl(c_url, filename, batch_progress, referer=c_ref)
-                if not downloaded:
-                    downloaded = await _download_hls_ffmpeg(c_url, filename, batch_progress, referer=c_ref)
-
-            if downloaded and os.path.exists(filename) and os.path.getsize(filename) > 50_000:
-                break
-            else:
-                downloaded = False
-                if os.path.exists(filename):
-                    try:
-                        os.remove(filename)
-                    except OSError:
-                        pass
+        if dl_url and not dl_url.endswith(".m3u8"):
+            downloaded = await _download_direct(dl_url, filename, referer=referer)
+        if not downloaded:
+            for s in streams:
+                if s.get("kind") == "hls" and s.get("url"):
+                    downloaded = await _download_n_m3u8dl(s["url"], filename, referer=referer)
+                    if not downloaded:
+                        downloaded = await _download_hls_ffmpeg(s["url"], filename, referer=referer)
+                    if downloaded:
+                        break
 
         if not downloaded or not os.path.exists(filename) or os.path.getsize(filename) < 50_000:
             if os.path.exists(filename):
-                os.remove(filename)
+                try:
+                    os.remove(filename)
+                except OSError:
+                    pass
             failed += 1
             continue
 
-        ep_info = None
-        ep_thumb = None
-        try:
-            ep_info = await asyncio.to_thread(hanime_api.details, ep_slug)
-            tags_str = ", ".join(ep_info.get("tags", [])[:5])
-            brand = ep_info.get("brand") or ("oppai.stream (4K)" if "4K" in quality_label else "hentai.tv")
-            caption = (
-                f"🎬 **{ep_name}**\n\n"
-                f"✨ **Quality:** {quality_label}\n"
-                f"🌐 **Source:** {brand}\n"
-                f"🔖 **Tags:** {tags_str}\n\n"
-                f"Downloaded via @hentai_dl_bot"
-            )
-            thumb_url = ep_info.get("poster_url") or ep_info.get("cover_url") or ""
-            if thumb_url:
-                ep_thumb = await download_thumbnail(thumb_url)
-        except Exception:
-            caption = f"🎬 **{ep_name}**\nDownloaded via @hentai_dl_bot"
-
+        # Upload episode
         try:
             sent = await client.send_document(
                 chat_id=chat_id,
                 document=filename,
-                caption=caption,
-                thumb=ep_thumb,
+                caption=f"🎬 **{ep_name}** [{quality_label}]\n\nDownloaded via @hentai_dl_bot",
             )
-            file_id = sent.document.file_id
+            await track_message(chat_id, sent.id)
             await db.Name.update_one(
                 {"name": ep_slug},
-                {"$set": {"name": ep_slug, "file_id": file_id, "file_size": sent.document.file_size}},
+                {"$set": {"name": ep_slug, "file_id": sent.document.file_id, "file_size": sent.document.file_size}},
                 upsert=True,
             )
-            
-            # Update catalog for batch downloads too
-            try:
-                ep_info = None
-                try:
-                    ep_info = await asyncio.to_thread(hanime_api.details, ep_slug)
-                except Exception:
-                    pass
-                
-                poster_url = ""
-                if ep_info:
-                    poster_url = ep_info.get("cover_url", "") or ep_info.get("poster_url", "") or ep_info.get("cover", "")
-                
-                await update_catalog(
-                    client=client,
-                    slug=ep_slug,
-                    file_id=file_id,
-                    file_size=sent.document.file_size,
-                    series_name=ep_info.get("name", "") if ep_info else ep_name,
-                    poster_url=poster_url,
-                    tags=ep_info.get("tags", []) if ep_info else [],
-                )
-            except Exception:
-                log.exception("Batch: failed to update catalog for %s", ep_slug)
-            
             succeeded += 1
         except Exception:
-            log.exception("Batch: upload failed for %s", ep_slug)
             failed += 1
         finally:
-            if ep_thumb and os.path.exists(ep_thumb):
+            if os.path.exists(filename):
                 try:
-                    os.unlink(ep_thumb)
+                    os.remove(filename)
                 except OSError:
                     pass
-            if os.path.exists(filename):
-                os.remove(filename)
 
+    final_bar = _progress_bar_detailed(100.0)
     try:
-        success_pct = (succeeded / total * 100) if total > 0 else 0
-        bar = _progress_bar(success_pct)
         await status_msg.edit_text(
-            f"✅ **Batch Download Complete!**\n\n"
-            f"{bar}\n\n"
-            f"📊 Total: {total}\n"
-            f"✅ Success: {succeeded}\n"
-            f"❌ Failed: {failed}"
+            f"✅ **Batch Download Finished!**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{final_bar}\n\n"
+            f"📊 **Total:** {total}\n"
+            f"✅ **Succeeded:** {succeeded}\n"
+            f"❌ **Failed:** {failed}"
         )
     except Exception:
         pass

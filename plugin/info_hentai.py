@@ -1,7 +1,8 @@
+"""Show Series Album details, episode grids, and quality download buttons."""
+
 import asyncio
 import logging
 import os
-import traceback
 
 from wzgram import Client
 from wzgram.types import (
@@ -10,15 +11,15 @@ from wzgram.types import (
     InlineKeyboardMarkup,
 )
 
-from api.hanime_api import HanimeAPI, BASE_URL
-
-hanime_api = HanimeAPI()
+from api.hanime_api import HanimeAPI
 from utils.auth import approved_only
 from utils.fsub import force_sub
 from utils.poster import download_poster
 from utils.autodelete import track_message, clear_chat_history
+from utils.slug_map import get_short_slug, resolve_slug
 
 log = logging.getLogger(__name__)
+hanime_api = HanimeAPI()
 
 
 async def _send_with_poster(client, chat_id, poster_url, text, keyboard):
@@ -27,9 +28,7 @@ async def _send_with_poster(client, chat_id, poster_url, text, keyboard):
     try:
         poster_path = await download_poster(poster_url)
         if not poster_path:
-            log.warning("Poster download returned None for %s", poster_url)
             return False
-        log.info("Poster downloaded to %s, size=%d", poster_path, os.path.getsize(poster_path))
         msg = await client.send_photo(
             chat_id=chat_id,
             photo=poster_path,
@@ -42,181 +41,180 @@ async def _send_with_poster(client, chat_id, poster_url, text, keyboard):
         log.exception("Failed to send poster")
         return False
     finally:
-        if poster_path:
+        if poster_path and os.path.exists(poster_path):
             try:
                 os.unlink(poster_path)
-            except Exception:
+            except OSError:
                 pass
 
-
-from utils.slug_map import get_short_slug, resolve_slug
 
 @approved_only
 @force_sub
 async def infohentai(client: Client, callback_query: CallbackQuery):
-    """Show details for a selected hentai (info_<slug> callback)."""
-    raw_slug = callback_query.data.split("_", 1)[1]
-    slug = await resolve_slug(raw_slug)
+    """Show Album/Series Overview with episode selector grid."""
+    raw_data = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_data)
     chat_id = callback_query.from_user.id
-    log.info("=== INFO HANDLER CALLED for slug=%s ===", slug)
-
-    # Clear old messages before showing new info
-    await clear_chat_history(client, chat_id, preserve_message_ids=[callback_query.message.id])
+    log.info("=== INFO HANDLER for slug=%s ===", slug)
 
     try:
-        await callback_query.answer("⚡ Loading details...")
+        await callback_query.answer("⚡ Loading series...")
     except Exception:
         pass
 
     try:
-        await callback_query.edit_message_text(
-            f"⏳ **Loading Details & Media...**\n"
-            f"Fetching title details and poster image..."
-        )
-    except Exception:
-        pass
-
-    try:
-        log.info("Fetching details for %s...", slug)
         info = await asyncio.to_thread(hanime_api.details, slug)
         if not info:
             raise ValueError(f"No details found for slug={slug}")
-        log.info("Got details: name=%s, episodes=%d, poster=%s",
-                 info.get("name"), len(info.get("episodes", [])), bool(info.get("poster_url")))
     except Exception:
-        log.exception("Details fetch FAILED for slug=%s", slug)
+        log.exception("Details fetch failed for slug=%s", slug)
         try:
-            await callback_query.answer("❌ API unavailable, try again later.", show_alert=True)
+            await callback_query.answer("❌ Title unavailable, please try again later.", show_alert=True)
         except Exception:
             pass
         return
 
-    name = info["title"]
-    poster = info["poster_url"]
-    summary = info["description"]
-    tags = info["tags"]
+    name = info.get("title") or info.get("name") or slug
+    poster = info.get("poster_url") or info.get("cover_url") or ""
+    summary = info.get("description") or "No description available."
+    tags = info.get("tags", [])
     episodes = info.get("episodes", [])
+    brand = info.get("brand") or "hentai.tv"
 
-    tags_str = ", ".join(tags[:10]) if tags else "N/A"
-    if len(tags) > 10:
-        tags_str += f" (+{len(tags) - 10} more)"
+    tags_str = ", ".join(tags[:8]) if tags else "N/A"
+    if len(tags) > 8:
+        tags_str += f" (+{len(tags) - 8} more)"
 
-    brand = info.get("brand") or "hentai.tv / oppai.stream"
+    total_eps = len(episodes)
     text = (
-        f"**{name}**\n\n"
+        f"🎬 **{name}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🌐 **Source:** {brand}\n"
-        f"📝 **Summary:** {summary}\n"
-        f"🔖 **Tags:** {tags_str}"
+        f"📺 **Total Episodes:** {total_eps}\n"
+        f"🔖 **Tags:** {tags_str}\n\n"
+        f"📝 **Summary:**\n{summary[:350]}{'...' if len(summary) > 350 else ''}"
     )
 
     short_key = await get_short_slug(slug)
     buttons = []
-    buttons.append([InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{short_key}")])
-    
-    if len(episodes) > 1:
-        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{short_key}")])
-    
-    buttons.append([InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{short_key}")])
+
+    # If series has multiple episodes -> Show Episode Selection Grid (3 buttons per row)
+    if total_eps > 1:
+        row = []
+        for i, ep in enumerate(episodes):
+            ep_slug = ep.get("slug", "")
+            ep_num = ep.get("ep", i + 1)
+            ep_short = await get_short_slug(ep_slug)
+            row.append(InlineKeyboardButton(f"📺 Ep {ep_num}", callback_data=f"eps_{ep_short}"))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+        buttons.append([InlineKeyboardButton("📥 Download All Episodes (Batch)", callback_data=f"ball_{short_key}")])
+        buttons.append([InlineKeyboardButton("🔗 Web Stream Links", callback_data=f"link_{short_key}")])
+    else:
+        # Single episode series -> Show direct Quality Download Buttons
+        streams_data = await asyncio.to_thread(hanime_api.get_streams, slug)
+        streams = streams_data.get("streams", [])
+        
+        has_4k = any(s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower() for s in streams)
+        has_1080 = any(s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower() for s in streams)
+        has_720 = any(s.get("height", 0) == 720 or "720" in s.get("label", "").lower() for s in streams)
+
+        if has_4k:
+            buttons.append([InlineKeyboardButton("✨ Download 4K (2160p)", callback_data=f"dlt_{short_key}_4k")])
+        if has_1080:
+            buttons.append([InlineKeyboardButton("📺 Download 1080p (Full HD)", callback_data=f"dlt_{short_key}_1080")])
+        if has_720:
+            buttons.append([InlineKeyboardButton("📱 Download 720p (HD)", callback_data=f"dlt_{short_key}_720")])
+        if not buttons:
+            buttons.append([InlineKeyboardButton("⬇️ Download Video", callback_data=f"dlt_{short_key}_best")])
+
+        buttons.append([InlineKeyboardButton("🔗 Web Stream Links", callback_data=f"link_{short_key}")])
 
     keyboard = InlineKeyboardMarkup(buttons)
 
-    log.info("Attempting to send info for %s (poster=%s, episodes=%d)", slug, bool(poster), len(episodes))
-
-    # Try with poster
+    # Try sending with poster
     sent_photo = False
     if poster:
-        sent_photo = await _send_with_poster(
-            client, callback_query.from_user.id, poster, text, keyboard
-        )
+        sent_photo = await _send_with_poster(client, chat_id, poster, text, keyboard)
         if sent_photo:
-            log.info("Poster sent successfully for %s", slug)
             try:
                 await callback_query.message.delete()
             except Exception:
                 pass
 
-    # Fallback to text
     if not sent_photo:
-        log.info("Falling back to text for %s", slug)
         try:
             await callback_query.edit_message_text(text, reply_markup=keyboard)
-            log.info("Text edit successful for %s", slug)
-        except Exception as e:
-            log.warning("edit_message_text failed for %s: %s", slug, e)
-            try:
-                msg = await client.send_message(
-                    chat_id=callback_query.from_user.id,
-                    text=text,
-                    reply_markup=keyboard,
-                )
-                await track_message(callback_query.from_user.id, msg.id)
-                log.info("Sent as new message for %s", slug)
-            except Exception:
-                log.exception("ALL methods failed for info_%s", slug)
+        except Exception:
+            msg = await client.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+            await track_message(chat_id, msg.id)
 
 
 @approved_only
 @force_sub
 async def episode_info(client: Client, callback_query: CallbackQuery):
-    """Show download/stream options for a specific episode (eps_<slug>)."""
-    raw_slug = callback_query.data.split("_", 1)[1]
-    slug = await resolve_slug(raw_slug)
-    log.info("=== EPISODE INFO CALLED for slug=%s ===", slug)
+    """Show Episode details with Quality Selection Buttons (eps_<slug>)."""
+    raw_data = callback_query.data.split("_", 1)[1]
+    slug = await resolve_slug(raw_data)
+    chat_id = callback_query.from_user.id
+    log.info("=== EPISODE INFO for slug=%s ===", slug)
 
     try:
-        await callback_query.answer("Loading episode...")
+        await callback_query.answer("⚡ Loading episode qualities...")
     except Exception:
         pass
 
     try:
         info = await asyncio.to_thread(hanime_api.details, slug)
-        if not info:
-            raise ValueError(f"No details found for slug={slug}")
+        streams_data = await asyncio.to_thread(hanime_api.get_streams, slug)
+        streams = streams_data.get("streams", [])
     except Exception:
-        log.exception("Details fetch failed for episode slug=%s", slug)
+        log.exception("Details fetch failed for episode %s", slug)
         try:
-            await callback_query.answer("❌ API unavailable", show_alert=True)
+            await callback_query.answer("❌ Episode unavailable.", show_alert=True)
         except Exception:
             pass
         return
 
-    name = info["title"]
-    poster = info["poster_url"]
+    name = info.get("title") or info.get("name") or slug
+    poster = info.get("poster_url") or info.get("cover_url") or ""
+    brand = info.get("brand") or "hentai.tv"
 
     text = (
-        f"📺 **{name}**\n\n"
-        "Choose an option:"
+        f"📺 **{name}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌐 **Source:** {brand}\n\n"
+        f"👇 **Choose video quality to download:**"
     )
 
-    # Get episode info to check if series has multiple episodes
-    series_info = None
-    try:
-        series_info = await asyncio.to_thread(hanime_api.details, slug)
-    except Exception:
-        pass
-    
-    has_multiple_eps = series_info and len(series_info.get("episodes", [])) > 1
-    
     short_key = await get_short_slug(slug)
-    buttons = [
-        [InlineKeyboardButton("⬇️ Download", callback_data=f"dlt_{short_key}")],
-    ]
-    
-    if has_multiple_eps:
-        buttons.append([InlineKeyboardButton("📥 Download All Episodes", callback_data=f"ball_{short_key}")])
-    
-    buttons.extend([
-        [InlineKeyboardButton("🔗 Stream Links", callback_data=f"link_{short_key}")],
-        [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{short_key}")],
-    ])
-    
+    buttons = []
+
+    has_4k = any(s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower() for s in streams)
+    has_1080 = any(s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower() for s in streams)
+    has_720 = any(s.get("height", 0) == 720 or "720" in s.get("label", "").lower() for s in streams)
+
+    if has_4k:
+        buttons.append([InlineKeyboardButton("✨ Download 4K (2160p Ultra HD)", callback_data=f"dlt_{short_key}_4k")])
+    if has_1080:
+        buttons.append([InlineKeyboardButton("📺 Download 1080p (Full HD)", callback_data=f"dlt_{short_key}_1080")])
+    if has_720:
+        buttons.append([InlineKeyboardButton("📱 Download 720p (HD)", callback_data=f"dlt_{short_key}_720")])
+    if not (has_4k or has_1080 or has_720):
+        buttons.append([InlineKeyboardButton("⬇️ Download Video", callback_data=f"dlt_{short_key}_best")])
+
+    buttons.append([InlineKeyboardButton("🔗 Web Stream Link", callback_data=f"link_{short_key}")])
+    buttons.append([InlineKeyboardButton("🔙 Back to Series", callback_data=f"info_{short_key}")])
+
     keyboard = InlineKeyboardMarkup(buttons)
 
     sent_photo = False
     if poster:
-        sent_photo = await _send_with_poster(
-            client, callback_query.from_user.id, poster, text, keyboard
-        )
+        sent_photo = await _send_with_poster(client, chat_id, poster, text, keyboard)
         if sent_photo:
             try:
                 await callback_query.message.delete()
@@ -227,12 +225,5 @@ async def episode_info(client: Client, callback_query: CallbackQuery):
         try:
             await callback_query.edit_message_text(text, reply_markup=keyboard)
         except Exception:
-            try:
-                msg = await client.send_message(
-                    chat_id=callback_query.from_user.id,
-                    text=text,
-                    reply_markup=keyboard,
-                )
-                await track_message(callback_query.from_user.id, msg.id)
-            except Exception:
-                log.exception("All methods failed for eps_%s", slug)
+            msg = await client.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+            await track_message(chat_id, msg.id)
