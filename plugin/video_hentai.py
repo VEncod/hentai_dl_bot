@@ -33,9 +33,9 @@ log = logging.getLogger(__name__)
 
 N_M3U8DL_RE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "binary", "N_m3u8DL-RE")
 
-DOWNLOAD_TIMEOUT = 300
-FFMPEG_TIMEOUT = 240
-N_M3U8DL_TIMEOUT = 180
+DOWNLOAD_TIMEOUT = 120
+FFMPEG_TIMEOUT = 60
+N_M3U8DL_TIMEOUT = 60
 
 PROGRESS_UPDATE_INTERVAL = 2.0
 PROGRESS_MIN_PERCENT_STEP = 3
@@ -699,42 +699,82 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
 
     try:
         downloaded = False
+        active_stream_label = quality_label
 
         # Progress callback with detailed stats
         async def on_progress(stats):
             if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 raise asyncio.CancelledError("Download cancelled by user")
-            msg = tracker.format_message(stats, title=f"Downloading [{quality_label}]...", slug=slug)
+            msg = tracker.format_message(stats, title=f"Downloading [{active_stream_label}]...", slug=slug)
             await _safe_edit(callback_query, msg, reply_markup=cancel_keyboard)
             if log_msg_id:
                 await log_download_progress(client, log_msg_id, username, slug, stats["pct"])
 
-        # Try direct download first
-        if dl_url and not dl_url.endswith('.m3u8'):
-            tracker = DownloadProgressTracker(0, start_time)
-            downloaded = await _download_direct(dl_url, filename, on_progress, referer=referer)
+        # Build candidate streams list (trying best qualities first)
+        candidate_urls = []
+        if dl_url:
+            candidate_urls.append({
+                "url": dl_url,
+                "referer": referer,
+                "kind": primary_stream.get("kind", ""),
+                "label": quality_label,
+                "extension": ext,
+            })
+        for s in streams:
+            if s.get("url") and not any(c["url"] == s["url"] for c in candidate_urls):
+                candidate_urls.append(s)
 
-        # Try HLS download
-        if not downloaded:
-            hls_url = dl_url if dl_url else None
-            if not hls_url:
-                for s in streams:
-                    if s.get('kind') == 'hls' and s.get('url'):
-                        hls_url = s['url']
-                        break
-            if hls_url:
-                log.info("Attempting HLS download: %s", hls_url[:80])
+        for candidate in candidate_urls:
+            c_url = candidate.get("url", "")
+            if not c_url:
+                continue
+            c_ref = candidate.get("referer", referer)
+            c_kind = candidate.get("kind", "")
+            c_label = candidate.get("label", quality_label)
+            c_ext = candidate.get("extension", "mp4")
+            active_stream_label = c_label
+            
+            # Adjust filename extension if needed
+            if c_ext and filename.rsplit(".", 1)[-1] != c_ext:
+                filename = f"{slug}.{c_ext}"
+                if chat_id in ACTIVE_DOWNLOADS:
+                    ACTIVE_DOWNLOADS[chat_id]["filename"] = filename
+
+            if not c_url.endswith(".m3u8") and c_kind != "hls":
+                log.info("Attempting direct download for %s: %s", slug, c_url[:80])
                 tracker = DownloadProgressTracker(0, start_time)
-                downloaded = await _download_n_m3u8dl(hls_url, filename, on_progress, referer=referer)
+                downloaded = await _download_direct(c_url, filename, on_progress, referer=c_ref)
+            elif ".m3u8" in c_url or c_kind == "hls":
+                log.info("Attempting HLS download for %s: %s", slug, c_url[:80])
+                tracker = DownloadProgressTracker(0, start_time)
+                downloaded = await _download_n_m3u8dl(c_url, filename, on_progress, referer=c_ref)
                 if not downloaded:
-                    downloaded = await _download_hls_ffmpeg(hls_url, filename, on_progress, referer=referer)
+                    downloaded = await _download_hls_ffmpeg(c_url, filename, on_progress, referer=c_ref)
+
+            if downloaded and os.path.exists(filename) and os.path.getsize(filename) > 50_000:
+                log.info("Successfully downloaded candidate stream %s for %s", c_label, slug)
+                break
+            else:
+                downloaded = False
+                if os.path.exists(filename):
+                    try:
+                        os.remove(filename)
+                    except OSError:
+                        pass
 
         # Failed
         if not downloaded:
             if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 return
             elapsed = int(time.time() - start_time)
-            await _safe_edit(callback_query, f"Download failed after {elapsed}s. No working streams found.")
+            is_oppai = "oppai" in slug or any("oppai" in s.get("referer", "") for s in streams)
+            err_extra = "\n\n💡 *Note: Some 18+ titles on Oppai require an account. Use `/oppai_login <username> <password>` to unlock.*" if is_oppai else ""
+            await _safe_edit(
+                callback_query,
+                f"❌ **Download Unavailable**\n\n"
+                f"Could not download **{slug}** (stream server rejected or requires login).{err_extra}\n\n"
+                f"Try another episode or title."
+            )
             await log_error(client, username, f"All download strategies failed for {slug}")
             if os.path.exists(filename):
                 os.remove(filename)
@@ -989,16 +1029,39 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             except Exception:
                 pass
 
-        if dl_url and not dl_url.endswith(".m3u8"):
-            downloaded = await _download_direct(dl_url, filename, batch_progress, referer=referer)
-        if not downloaded:
-            for s in streams:
-                if s.get("kind") == "hls" and s.get("url"):
-                    downloaded = await _download_n_m3u8dl(s["url"], filename, batch_progress, referer=referer)
-                    if not downloaded:
-                        downloaded = await _download_hls_ffmpeg(s["url"], filename, batch_progress, referer=referer)
-                    if downloaded:
-                        break
+        candidate_urls = []
+        if dl_url:
+            candidate_urls.append({"url": dl_url, "referer": referer, "kind": primary_stream.get("kind", ""), "extension": ext})
+        for s in streams:
+            if s.get("url") and not any(c["url"] == s["url"] for c in candidate_urls):
+                candidate_urls.append(s)
+
+        for candidate in candidate_urls:
+            c_url = candidate.get("url", "")
+            if not c_url:
+                continue
+            c_ref = candidate.get("referer", referer)
+            c_kind = candidate.get("kind", "")
+            c_ext = candidate.get("extension", "mp4")
+            if c_ext and filename.rsplit(".", 1)[-1] != c_ext:
+                filename = f"{ep_slug}.{c_ext}"
+
+            if not c_url.endswith(".m3u8") and c_kind != "hls":
+                downloaded = await _download_direct(c_url, filename, batch_progress, referer=c_ref)
+            elif ".m3u8" in c_url or c_kind == "hls":
+                downloaded = await _download_n_m3u8dl(c_url, filename, batch_progress, referer=c_ref)
+                if not downloaded:
+                    downloaded = await _download_hls_ffmpeg(c_url, filename, batch_progress, referer=c_ref)
+
+            if downloaded and os.path.exists(filename) and os.path.getsize(filename) > 50_000:
+                break
+            else:
+                downloaded = False
+                if os.path.exists(filename):
+                    try:
+                        os.remove(filename)
+                    except OSError:
+                        pass
 
         if not downloaded or not os.path.exists(filename) or os.path.getsize(filename) < 50_000:
             if os.path.exists(filename):

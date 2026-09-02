@@ -145,8 +145,41 @@ class HanimeAPI:
 
     def get_streams(self, slug: str) -> dict:
         info = self.details(slug)
-        streams = info.get("streams", [])
+        streams = list(info.get("streams", []))
         
+        # Cross-resolve from Oppai if this is an htv title
+        if slug.startswith("htv__"):
+            try:
+                title = info.get("title") or info.get("name") or ""
+                ep = 1
+                for e in info.get("episodes", []):
+                    if e.get("slug") == slug:
+                        ep = e.get("ep", 1)
+                        break
+                
+                clean_title = re.sub(r"—\s*", " ", title)
+                clean_title = re.sub(r"\b(Season|The Animation|OVA|Episode\s*\d+)\b", "", clean_title, flags=re.I)
+                clean_title = re.sub(r"\s+", " ", clean_title).strip()
+                
+                if clean_title:
+                    oppai_res = self._search_oppai(clean_title)
+                    oppai_match = None
+                    for item in oppai_res:
+                        m = re.search(r"[-_](\d+)$", item.get("slug", ""))
+                        if m and int(m.group(1)) == ep:
+                            oppai_match = item
+                            break
+                    if not oppai_match and oppai_res:
+                        oppai_match = oppai_res[0]
+
+                    if oppai_match:
+                        oppai_det = self.details(oppai_match["slug"])
+                        for st in oppai_det.get("streams", []):
+                            if st.get("url") and not any(existing.get("url") == st["url"] for existing in streams):
+                                streams.append(st)
+            except Exception as e:
+                log.debug("Cross-source resolution failed for %s: %s", slug, e)
+
         # Sort quality preference: 4K/2160p (0) > 1080p (1) > 720p (2)
         quality_order = {"4k": 0, "2160": 0, "1080": 1, "720": 2}
         streams = sorted(
