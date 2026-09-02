@@ -1,10 +1,6 @@
-"""
-Slug Mapping Utility.
+"""Slug Mapping Utility with non-blocking caching."""
 
-Ensures Telegram inline button callback_data is always <= 64 bytes by mapping
-long video/series slugs to short 16-character MD5 hashes with MongoDB + memory caching.
-"""
-
+import asyncio
 import hashlib
 import logging
 from utils.db import get_db
@@ -23,17 +19,21 @@ async def get_short_slug(slug: str) -> str:
         return slug
 
     short_hash = hashlib.md5(slug.encode("utf-8")).hexdigest()[:16]
+    
+    if short_hash in _memory_slug_cache:
+        return short_hash
+
     _memory_slug_cache[short_hash] = slug
 
     try:
         db = get_db()
-        await db.slug_map.update_one(
+        asyncio.create_task(db.slug_map.update_one(
             {"short": short_hash},
             {"$set": {"short": short_hash, "full": slug}},
             upsert=True,
-        )
+        ))
     except Exception as e:
-        log.warning("Could not persist slug map to DB: %s", e)
+        log.debug("Could not persist slug map to DB: %s", e)
 
     return short_hash
 

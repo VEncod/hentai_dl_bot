@@ -5,6 +5,7 @@ All items carry a source prefix ('htv__' for hentai.tv, 'oppai__' for oppai.stre
 """
 
 import base64
+import concurrent.futures
 import html
 import logging
 import re
@@ -104,28 +105,37 @@ class HanimeAPI:
         return bool(self.session.cookies.get_dict(domain="oppai.stream"))
 
     def search(self, query: str, page: int = 0, source: str | None = None) -> list[dict]:
-        """Search hentai.tv, oppai.stream, or both."""
+        """Search hentai.tv, oppai.stream, or both concurrently."""
         results = []
+        clean_q = (query or "").strip()
+        if not clean_q:
+            return results
 
-        # 1. Primary / Default Source: hentai.tv
+        sources_to_run = []
         if source in (None, "both", "htv", "hentai_tv"):
-            try:
-                htv_results = self._search_hentai_tv(query, page)
-                results.extend(htv_results)
-            except Exception:
-                log.exception("hentai.tv search failed for query %r", query)
-
-        # 2. 4K Quality Source: oppai.stream
+            sources_to_run.append("htv")
         if source in (None, "both", "oppai", "oppai_stream"):
-            try:
-                oppai_results = self._search_oppai(query, page)
-                results.extend(oppai_results)
-            except Exception:
-                log.exception("oppai.stream search failed for query %r", query)
+            sources_to_run.append("oppai")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(sources_to_run))) as executor:
+            future_to_src = {}
+            if "htv" in sources_to_run:
+                future_to_src[executor.submit(self._search_hentai_tv, clean_q, page)] = "htv"
+            if "oppai" in sources_to_run:
+                future_to_src[executor.submit(self._search_oppai, clean_q, page)] = "oppai"
+
+            for future in concurrent.futures.as_completed(future_to_src, timeout=12):
+                src_name = future_to_src[future]
+                try:
+                    res = future.result()
+                    if res:
+                        results.extend(res)
+                except Exception:
+                    log.exception("%s search failed for query %r", src_name, clean_q)
 
         # Prioritize exact title matches
-        query_clean = query.strip().lower()
-        exact = [item for item in results if item["name"].lower() == query_clean]
+        query_clean = clean_q.lower()
+        exact = [item for item in results if item.get("name", "").lower() == query_clean]
         non_exact = [item for item in results if item not in exact]
 
         combined = exact + non_exact
