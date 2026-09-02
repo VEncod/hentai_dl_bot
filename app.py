@@ -83,19 +83,19 @@ async def main():
 
     # Sync channel configuration from environment variables if present
     from utils.db import get_db
-    env_cache_ch = os.environ.get("CACHE_CHANNEL") or os.environ.get("MAIN_CHANNEL")
-    if env_cache_ch:
+    env_main_ch = os.environ.get("MAIN_CHANNEL")
+    if env_main_ch:
         try:
             await get_db().config.update_one(
                 {"key": "main_channel"},
-                {"$set": {"key": "main_channel", "value": int(env_cache_ch)}},
+                {"$set": {"key": "main_channel", "value": int(env_main_ch)}},
                 upsert=True,
             )
-            log.info("Main/Cache channel configured from env: %s", env_cache_ch)
+            log.info("Main (Catalog) channel configured from env: %s", env_main_ch)
         except ValueError:
             pass
 
-    env_log_ch = os.environ.get("LOG_CHANNEL")
+    env_log_ch = os.environ.get("LOG_CHANNEL") or os.environ.get("CACHE_CHANNEL")
     if env_log_ch:
         try:
             await get_db().config.update_one(

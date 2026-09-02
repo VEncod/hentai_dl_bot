@@ -745,16 +745,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             f"Auto-deletes in 10 minutes. Save it to your saved messages!"
         )
 
-        # ── Send to Main Channel / Archive ──
-        main_channel = await get_main_channel()
-        if main_channel and sent:
-            try:
-                await sent.copy(chat_id=main_channel)
-                log.info("Copied downloaded video to main channel %s", main_channel)
-            except Exception as e_mc:
-                log.warning("Failed to copy video to main channel %s: %s", main_channel, e_mc)
-
-        # ── Update Catalog Channel ──
+        # ── Update Series Catalog in Main Channel (Poster + Get Episodes Button) ──
         try:
             poster_url = info.get("cover_url", "") or info.get("poster_url", "") if info else ""
             tags_list = info.get("tags", []) if info else []
@@ -894,13 +885,6 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 caption=f"🎬 **{ep_name}** [{quality_label}]\n\nDownloaded via @hentai_dl_bot",
             )
             await track_message(chat_id, sent.id)
-
-            main_ch = await get_main_channel()
-            if main_ch and sent:
-                try:
-                    await sent.copy(chat_id=main_ch)
-                except Exception:
-                    pass
 
             await db.Name.update_one(
                 {"name": ep_slug},

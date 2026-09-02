@@ -36,7 +36,7 @@ async def get_main_channel() -> int | None:
     doc = await db.config.find_one({"key": "main_channel"})
     if doc and doc.get("value"):
         return int(doc["value"])
-    env_ch = os.environ.get("MAIN_CHANNEL") or os.environ.get("CACHE_CHANNEL")
+    env_ch = os.environ.get("MAIN_CHANNEL")
     if env_ch:
         try:
             return int(env_ch)
