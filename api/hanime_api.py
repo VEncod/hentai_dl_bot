@@ -650,15 +650,16 @@ class HanimeAPI:
 
         # Sibling episodes lookup using similarity matching
         episodes = []
-        base_name = re.sub(r"[-_]\d+$", "", raw_slug)
-        search_q = base_name.replace("-", " ").strip()
+        tokens = _clean_tokens(raw_slug)
+        search_q = tokens[0] if tokens else raw_slug.split("-")[0]
         try:
             r_search = self.session.get(
                 f"{OPPAI_BASE}/actions/search.php",
                 params={"text": search_q, "order": "recent", "limit": 40},
-                timeout=10,
+                timeout=8,
             )
             s_soup = BeautifulSoup(r_search.text, "html.parser")
+            clean_raw = raw_slug.replace("~", " ").replace("-", " ")
             for card in s_soup.select(".episode-shown"):
                 link = card.select_one("a[href*='/watch?e=']")
                 if not link:
@@ -667,20 +668,29 @@ class HanimeAPI:
                 ep_raw_slug = parse_qs(urlparse(ep_url).query).get("e", [""])[0]
                 if not ep_raw_slug:
                     continue
+
+                title_node = card.select_one("font.title")
+                card_title = title_node.get_text(" ", strip=True) if title_node else card.get("name", ep_raw_slug)
+
+                clean_ep = ep_raw_slug.replace("~", " ").replace("-", " ")
+                if not _are_same_series(card_title, clean_raw) and not _are_same_series(clean_ep, clean_raw):
+                    continue
+
                 ep_match = re.search(r"[-_](\d+)$", ep_raw_slug)
                 ep_num = _int(ep_match.group(1), 1) if ep_match else 1
                 ep_slug = _prefixed("oppai", ep_raw_slug)
-                episodes.append({
-                    "id": ep_slug,
-                    "slug": ep_slug,
-                    "name": f"Episode {ep_num}",
-                    "title": f"Episode {ep_num}",
-                    "ep": ep_num,
-                    "url": ep_url,
-                })
+                if not any(e["slug"] == ep_slug or e["ep"] == ep_num for e in episodes):
+                    episodes.append({
+                        "id": ep_slug,
+                        "slug": ep_slug,
+                        "name": f"Episode {ep_num}",
+                        "title": f"Episode {ep_num}",
+                        "ep": ep_num,
+                        "url": ep_url,
+                    })
             episodes.sort(key=lambda x: x["ep"])
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Oppai sibling episodes lookup failed: %s", e)
 
         slug = _prefixed("oppai", raw_slug)
         if not episodes:
