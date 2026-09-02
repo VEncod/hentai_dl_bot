@@ -81,6 +81,32 @@ async def main():
     from api.hanime_api import HanimeAPI
     await HanimeAPI.load_saved_session()
 
+    # Sync channel configuration from environment variables if present
+    from utils.db import get_db
+    env_cache_ch = os.environ.get("CACHE_CHANNEL") or os.environ.get("MAIN_CHANNEL")
+    if env_cache_ch:
+        try:
+            await get_db().config.update_one(
+                {"key": "main_channel"},
+                {"$set": {"key": "main_channel", "value": int(env_cache_ch)}},
+                upsert=True,
+            )
+            log.info("Main/Cache channel configured from env: %s", env_cache_ch)
+        except ValueError:
+            pass
+
+    env_log_ch = os.environ.get("LOG_CHANNEL")
+    if env_log_ch:
+        try:
+            await get_db().config.update_one(
+                {"key": "log_channel"},
+                {"$set": {"key": "log_channel", "value": int(env_log_ch)}},
+                upsert=True,
+            )
+            log.info("Log channel configured from env: %s", env_log_ch)
+        except ValueError:
+            pass
+
     # ── Auto-delete middleware (runs BEFORE all handlers on every private interaction) ──
     bot.add_handler(MessageHandler(autodelete_message_middleware, filters.private), group=-1)
     bot.add_handler(CallbackQueryHandler(autodelete_callback_middleware), group=-1)
