@@ -314,10 +314,10 @@ async def _safe_edit(callback_query: CallbackQuery, text: str, reply_markup=None
 
 async def _download_direct(url: str, filename: str, progress_cb=None, referer: str = "", chat_id: int = 0) -> bool:
     try:
-        if not referer:
-            if "oppai.stream" in url or "myspacecat.pictures" in url:
-                referer = "https://oppai.stream/"
-            elif "hentai.tv" in url or "nhplayer.com" in url or "1hanime.com" in url:
+        if "oppai.stream" in url or "myspacecat.pictures" in url:
+            referer = "https://oppai.stream/"
+        elif not referer:
+            if "hentai.tv" in url or "nhplayer.com" in url or "1hanime.com" in url:
                 referer = "https://hentai.tv/"
 
         timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=60)

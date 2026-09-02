@@ -157,6 +157,48 @@ class HanimeAPI:
         info = self.details(slug)
         streams = list(info.get("streams", []))
 
+        # If slug is from hentai.tv, cross-resolve working direct mirror streams (1080p/720p/4K)
+        if slug.startswith("htv__"):
+            try:
+                title = info.get("title") or info.get("name") or ""
+                ep = 1
+                m_ep = re.search(r"-episode-(\d+)$", slug)
+                if m_ep:
+                    ep = int(m_ep.group(1))
+
+                search_term = re.sub(r"—\s*", " ", title)
+                search_term = re.sub(r"\b(Season|The Animation|OVA|Episode\s*\d+)\b", "", search_term, flags=re.I)
+                search_term = re.sub(r"\s+", " ", search_term).strip()
+
+                if search_term:
+                    r_oppai = self.session.get(
+                        f"{OPPAI_BASE}/actions/search.php",
+                        params={"text": search_term, "limit": 40},
+                        timeout=8,
+                    )
+                    soup = BeautifulSoup(r_oppai.text, "html.parser")
+                    match_slug = None
+                    for card in soup.select(".episode-shown"):
+                        link = card.select_one('a[href*="/watch?e="]')
+                        if link:
+                            raw_e = link.get("href").split("?e=")[1].split("&")[0]
+                            m = re.search(r"[-_](\d+)$", raw_e)
+                            if m and int(m.group(1)) == ep:
+                                match_slug = raw_e
+                                break
+                    if not match_slug and soup.select(".episode-shown"):
+                        first_link = soup.select_one('.episode-shown a[href*="/watch?e="]')
+                        if first_link:
+                            match_slug = first_link.get("href").split("?e=")[1].split("&")[0]
+
+                    if match_slug:
+                        m_det = self.details(f"oppai__{match_slug}")
+                        for st in m_det.get("streams", []):
+                            if st.get("url") and not any(s.get("url") == st["url"] for s in streams):
+                                streams.append(st)
+            except Exception as e:
+                log.debug("Mirror resolution failed for %s: %s", slug, e)
+
         # Sort quality preference: 4K/2160p (0) > 1080p (1) > 720p (2)
         quality_order = {"4k": 0, "2160": 0, "1080": 1, "720": 2}
         streams = sorted(
