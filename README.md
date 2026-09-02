@@ -287,7 +287,8 @@ Both engines are automatically installed during setup. N_m3u8DL-RE is bundled in
 - **[N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE)** — HLS stream downloader
 - **[FFmpeg](https://ffmpeg.org/)** — Video processing and stream downloading
 - **[MongoDB](https://www.mongodb.com/)** — Database for users, cache, config, and archives
-- **[Hanime.tv API](https://hanime.tv/)** — Video search and streaming data
+- **[Hentai.tv](https://hentai.tv/)** — Default video search and streaming source
+- **[Oppai.stream](https://oppai.stream/)** — 4K Ultra HD video and streaming source
 
 ---
 

@@ -50,15 +50,37 @@ async def hentailink(client: Client, callback_query: CallbackQuery):
     slug = await resolve_slug(raw_slug)
     short_key = await get_short_slug(slug)
 
+    try:
+        data = await asyncio.to_thread(hanime_api.get_streams, slug)
+        info = await asyncio.to_thread(hanime_api.details, slug)
+    except Exception:
+        data = {}
+        info = {}
+
+    streams = data.get("streams", [])
+    watch_url = info.get("url", "")
+    title = info.get("title") or info.get("name") or slug
+
+    qualities = [s.get("label", f"{s.get('height')}p") for s in streams if s.get("label") or s.get("height")]
+    qualities_str = " • ".join(qualities) if qualities else "1080p Full HD"
+
+    text = (
+        f"📺 **{title}**\n\n"
+        f"✨ **Available Qualities:** {qualities_str}\n"
+    )
+    if watch_url:
+        text += f"🌐 **Web Stream:** [Watch on Web]({watch_url})\n\n"
+    text += "Use the **Download** button below to download the highest quality directly in Telegram."
+
     keyboard = [
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"info_{short_key}")]
+        [InlineKeyboardButton("⬇️ Download Now", callback_data=f"dlt_{short_key}")],
+        [InlineKeyboardButton("⬅️ Back to Info", callback_data=f"info_{short_key}")]
     ]
 
     await callback_query.edit_message_text(
-        f"📺 **Streaming Info**\n\n"
-        f"Use the **Download** button to get the video file.\n\n"
-        "Please share the bot if you like it",
+        text,
         reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=False,
     )
 
 
@@ -325,14 +347,24 @@ async def _safe_edit(callback_query: CallbackQuery, text: str, reply_markup=None
         pass
 
 
-async def _download_direct(url: str, filename: str, progress_cb=None) -> bool:
+async def _download_direct(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
     try:
+        if not referer:
+            if "oppai.stream" in url or "myspacecat.pictures" in url:
+                referer = "https://oppai.stream/"
+            elif "hentai.tv" in url or "nhplayer.com" in url or "1hanime.com" in url:
+                referer = "https://hentai.tv/"
+
         timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=60)
         connector = aiohttp.TCPConnector(limit=5, force_close=False)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*",
         }
+        if referer:
+            headers["Referer"] = referer
+            headers["Origin"] = referer.rstrip("/")
+
         async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers) as session:
             async with session.get(url) as resp:
                 resp.raise_for_status()
@@ -381,11 +413,12 @@ async def _download_direct(url: str, filename: str, progress_cb=None) -> bool:
         return False
 
 
-async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None) -> bool:
+async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
     if not os.path.exists(N_M3U8DL_RE):
         log.warning("N_m3u8DL-RE binary not found at %s", N_M3U8DL_RE)
         return False
 
+    ref = referer or ("https://oppai.stream/" if "oppai" in url else "https://hentai.tv/")
     try:
         try:
             os.chmod(N_M3U8DL_RE, 0o755)
@@ -403,8 +436,8 @@ async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None) -> bool:
             "--tmp-dir", "/tmp",
             "--no-log",
             "--auto-select",
-            "-H", f"Referer: {BASE_URL}/",
-            "-H", f"Origin: {BASE_URL}",
+            "-H", f"Referer: {ref}",
+            "-H", f"Origin: {ref.rstrip('/')}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -471,13 +504,14 @@ async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None) -> bool:
         return False
 
 
-async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None) -> bool:
+async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
     try:
+        ref = referer or ("https://oppai.stream/" if "oppai" in url else "https://hentai.tv/")
         start_time = time.time()
         
         process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
-            "-headers", f"Referer: {BASE_URL}/\r\nOrigin: {BASE_URL}\r\n",
+            "-headers", f"Referer: {ref}\r\nOrigin: {ref.rstrip('/')}\r\n",
             "-i", url,
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
@@ -644,7 +678,13 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         await log_error(client, username, f"No sources/dl_url for {slug}")
         return
 
-    filename = f"{slug}.mp4"
+    # Determine file extension and referer
+    primary_stream = streams[0] if streams else {}
+    ext = primary_stream.get("extension") or ("webm" if dl_url.endswith(".webm") else "mp4")
+    referer = primary_stream.get("referer", "")
+    quality_label = primary_stream.get("label", "1080p")
+    filename = f"{slug}.{ext}"
+
     cancel_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🛑 Stop Download", callback_data=f"canceldl_{chat_id}")]
     ])
@@ -657,49 +697,14 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         "filename": filename,
     }
 
-    await _safe_edit(
-        callback_query,
-        f"🚀 **Preparing Download**\n\n{_progress_bar(0)}\n\n⏳ Please wait...",
-        reply_markup=cancel_keyboard
-    )
-
     try:
-        log_msg_id = await log_download_start(client, username, slug)
-
-        # Fetch streams
-        try:
-            data = await asyncio.to_thread(hanime_api.get_streams, slug)
-        except Exception:
-            log.exception("Failed to fetch streams for slug=%s", slug)
-            await _safe_edit(callback_query, "API unavailable. Please try again later.")
-            await log_error(client, username, f"Stream fetch failed for {slug}")
-            return
-
-        dl_url = data.get("dl_url", "")
-        streams = data.get("streams", [])
-        sources = data.get("sources", [])
-
-        log.info("Sources for %s: dl_url=%s, streams=%d, sources=%d",
-                 slug, dl_url[:60] if dl_url else None, len(streams), len(sources))
-
-        if not dl_url and not streams:
-            elapsed = int(time.time() - start_time)
-            await _safe_edit(
-                callback_query,
-                "❌ **No Download Sources Available**\n\n"
-                "This title may be region-locked or not yet available for download.\n"
-                "Try another episode or title."
-            )
-            await log_error(client, username, f"No sources/dl_url for {slug}")
-            return
-
         downloaded = False
 
         # Progress callback with detailed stats
         async def on_progress(stats):
             if ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
                 raise asyncio.CancelledError("Download cancelled by user")
-            msg = tracker.format_message(stats, title="Downloading...", slug=slug)
+            msg = tracker.format_message(stats, title=f"Downloading [{quality_label}]...", slug=slug)
             await _safe_edit(callback_query, msg, reply_markup=cancel_keyboard)
             if log_msg_id:
                 await log_download_progress(client, log_msg_id, username, slug, stats["pct"])
@@ -707,7 +712,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         # Try direct download first
         if dl_url and not dl_url.endswith('.m3u8'):
             tracker = DownloadProgressTracker(0, start_time)
-            downloaded = await _download_direct(dl_url, filename, on_progress)
+            downloaded = await _download_direct(dl_url, filename, on_progress, referer=referer)
 
         # Try HLS download
         if not downloaded:
@@ -720,9 +725,9 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             if hls_url:
                 log.info("Attempting HLS download: %s", hls_url[:80])
                 tracker = DownloadProgressTracker(0, start_time)
-                downloaded = await _download_n_m3u8dl(hls_url, filename, on_progress)
+                downloaded = await _download_n_m3u8dl(hls_url, filename, on_progress, referer=referer)
                 if not downloaded:
-                    downloaded = await _download_hls_ffmpeg(hls_url, filename, on_progress)
+                    downloaded = await _download_hls_ffmpeg(hls_url, filename, on_progress, referer=referer)
 
         # Failed
         if not downloaded:
@@ -776,12 +781,15 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             info = await asyncio.to_thread(hanime_api.details, slug)
             series_name = _extract_series_name(slug)
             tags_str = ", ".join(info.get("tags", [])[:5])
+            brand = info.get("brand") or ("oppai.stream (4K)" if "4K" in quality_label else "hentai.tv")
             caption = (
-                f"{info['name']}\n"
-                f"Tags: {tags_str}\n"
-                f"Downloaded via @hanime_dl_bot"
+                f"🎬 **{info.get('title') or info.get('name') or slug}**\n\n"
+                f"✨ **Quality:** {quality_label}\n"
+                f"🌐 **Source:** {brand}\n"
+                f"🔖 **Tags:** {tags_str}\n\n"
+                f"Downloaded via @hentai_dl_bot"
             )
-            # Episode thumbnail (cover_url = wide episode art, distinct from series poster)
+            # Episode thumbnail
             thumb_url = info.get("poster_url") or info.get("cover_url") or ""
             if thumb_url:
                 thumb_path = await download_thumbnail(thumb_url)
@@ -957,14 +965,13 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             failed += 1
             continue
 
-        dl_url = data["dl_url"]
-        if dl_url:
-            m = re.match(r"https?://pixeldrain\.com/[du]/([A-Za-z0-9]+)", dl_url)
-            if m:
-                dl_url = f"https://pixeldrain.com/api/file/{m.group(1)}"
-
-        streams = data["streams"]
-        filename = f"{ep_slug}.mp4"
+        dl_url = data.get("dl_url", "")
+        streams = data.get("streams", [])
+        primary_stream = streams[0] if streams else {}
+        ext = primary_stream.get("extension") or ("webm" if dl_url.endswith(".webm") else "mp4")
+        referer = primary_stream.get("referer", "")
+        quality_label = primary_stream.get("label", "1080p")
+        filename = f"{ep_slug}.{ext}"
         downloaded = False
         
         # Progress callback for batch downloads
@@ -974,7 +981,7 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
                 await status_msg.edit_text(
                     f"📥 **Batch Download**\n\n"
                     f"{bar}\n\n"
-                    f"📺 Downloading: {ep_name}\n"
+                    f"📺 Downloading: {ep_name} [{quality_label}]\n"
                     f"📊 Progress: {i + 1}/{total}\n"
                     f"✅ Done: {succeeded} | ❌ Failed: {failed}\n\n"
                     f"⚡ Speed: {_format_speed(stats['speed'])} | ⏳ ETA: {_format_time(stats['eta'])}"
@@ -982,14 +989,14 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             except Exception:
                 pass
 
-        if dl_url:
-            downloaded = await _download_direct(dl_url, filename, batch_progress)
+        if dl_url and not dl_url.endswith(".m3u8"):
+            downloaded = await _download_direct(dl_url, filename, batch_progress, referer=referer)
         if not downloaded:
             for s in streams:
-                if s["kind"] == "hls":
-                    downloaded = await _download_n_m3u8dl(s["url"], filename, batch_progress)
+                if s.get("kind") == "hls" and s.get("url"):
+                    downloaded = await _download_n_m3u8dl(s["url"], filename, batch_progress, referer=referer)
                     if not downloaded:
-                        downloaded = await _download_hls_ffmpeg(s["url"], filename, batch_progress)
+                        downloaded = await _download_hls_ffmpeg(s["url"], filename, batch_progress, referer=referer)
                     if downloaded:
                         break
 
@@ -1004,12 +1011,19 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
         try:
             ep_info = await asyncio.to_thread(hanime_api.details, ep_slug)
             tags_str = ", ".join(ep_info.get("tags", [])[:5])
-            caption = f"{ep_name}\nTags: {tags_str}\nDownloaded via @hanime_dl_bot"
+            brand = ep_info.get("brand") or ("oppai.stream (4K)" if "4K" in quality_label else "hentai.tv")
+            caption = (
+                f"🎬 **{ep_name}**\n\n"
+                f"✨ **Quality:** {quality_label}\n"
+                f"🌐 **Source:** {brand}\n"
+                f"🔖 **Tags:** {tags_str}\n\n"
+                f"Downloaded via @hentai_dl_bot"
+            )
             thumb_url = ep_info.get("poster_url") or ep_info.get("cover_url") or ""
             if thumb_url:
                 ep_thumb = await download_thumbnail(thumb_url)
         except Exception:
-            caption = f"{ep_name}\nDownloaded via @hanime_dl_bot"
+            caption = f"🎬 **{ep_name}**\nDownloaded via @hentai_dl_bot"
 
         try:
             sent = await client.send_document(

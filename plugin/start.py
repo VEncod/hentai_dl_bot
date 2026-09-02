@@ -33,9 +33,11 @@ WELCOME_TEXT = (
     "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     "🎌 Your ultimate hentai companion — search, stream,\n"
     "and download your favorite titles directly to Telegram.\n\n"
-    "💬 **Just type any hentai name to search!**\n\n"
+    "🌐 **Default Source:** Hentai.tv (1080p Full HD)\n"
+    "✨ **4K Ultra HD Source:** Oppai.stream\n\n"
+    "💬 **Type any hentai name to search, or tap the buttons below to switch search mode!**\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "⚡ Powered by Hanime.tv API & FFmpeg\n"
+    "⚡ Powered by Hentai.tv, Oppai.stream & FFmpeg\n"
     "👨‍💻 **Created by Mr. Aman**"
 )
 
@@ -46,7 +48,8 @@ OWNER_SETUP_TEXT = (
     "**🛡 Admin Commands:**\n"
     "• `/addadmin <user_id>` — Add admins\n"
     "• `/removeadmin <user_id>` — Remove admins\n"
-    "• `/admins` — List all admins\n\n"
+    "• `/admins` — List all admins\n"
+    "• `/oppai_login` — Log in to Oppai.stream\n\n"
     "**👥 User Management:**\n"
     "• `/pending` — View access requests\n"
     "• `/approve / /reject <user_id>`\n"
@@ -56,7 +59,7 @@ OWNER_SETUP_TEXT = (
     "• `/setlog <channel_id>` — Set log channel\n"
     "• `/setchannel <channel_id>` — Set archive channel\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "⚡ Powered by Hanime.tv API & FFmpeg\n"
+    "⚡ Powered by Hentai.tv, Oppai.stream & FFmpeg\n"
     "👨‍💻 **Created by Mr. Aman**"
 )
 
@@ -92,21 +95,24 @@ async def _get_next_welcome_image() -> str | None:
 
 
 async def _send_welcome(client: Client, chat_id: int, text: str) -> Message | None:
-    """Send welcome message with the next image in sequence. Returns the sent message."""
+    """Send welcome message with the next image in sequence and Custom Reply Keyboard."""
+    from utils.keyboard import get_main_reply_keyboard
     img = await _get_next_welcome_image()
     msg = None
+    reply_kb = get_main_reply_keyboard()
     if img:
         try:
             msg = await client.send_photo(
                 chat_id=chat_id,
                 photo=img,
                 caption=text,
+                reply_markup=reply_kb,
             )
         except Exception:
             log.warning("Failed to send welcome image")
 
     if not msg:
-        msg = await client.send_message(chat_id=chat_id, text=text)
+        msg = await client.send_message(chat_id=chat_id, text=text, reply_markup=reply_kb)
 
     if msg:
         await track_message(chat_id, msg.id)
