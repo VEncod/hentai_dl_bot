@@ -50,6 +50,50 @@ def _int(value, default: int = 0) -> int:
         return default
 
 
+def _clean_tokens(title: str) -> list[str]:
+    """Extract clean lowercase alphanumeric words from a title."""
+    return re.findall(r"[a-zA-Z0-9]+", (title or "").lower())
+
+
+def _are_same_series(title1: str, title2: str) -> bool:
+    """Determine if two titles refer to the same hentai series.
+    
+    Considers titles the same if:
+    - 3 or 4 same words match, OR
+    - The first 2-3 words are identical (e.g. 'Imaizumi Takes all the Girls' vs 'Imaizumi Takes all the Women'), OR
+    - One title is a substring / sub-phrase of the other.
+    """
+    t1 = (title1 or "").strip().lower()
+    t2 = (title2 or "").strip().lower()
+    if t1 == t2:
+        return True
+
+    words1 = _clean_tokens(t1)
+    words2 = _clean_tokens(t2)
+    if not words1 or not words2:
+        return False
+
+    min_len = min(len(words1), len(words2))
+    # Check if first 3 words match (e.g. 'imaizumi takes all')
+    if min_len >= 3 and words1[:3] == words2[:3]:
+        return True
+    if min_len == 2 and words1[:2] == words2[:2]:
+        return True
+    if min_len == 1 and words1[0] == words2[0] and len(words1[0]) >= 4:
+        return True
+
+    # Check if 3 or more words match anywhere in the titles
+    common_words = set(words1) & set(words2)
+    if len(common_words) >= 3:
+        return True
+
+    # Sub-phrase match
+    if (len(t1) >= 5 and t1 in t2) or (len(t2) >= 5 and t2 in t1):
+        return True
+
+    return False
+
+
 class HanimeAPI:
     """Content API wrapper for hentaicity.com (default source) and oppai.stream (4K source)."""
 
@@ -209,7 +253,7 @@ class HanimeAPI:
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
-        series_map = {}
+        series_list = []
         for item in soup.select(".item"):
             a = item.select_one('a[href*="/video/"]')
             img = item.select_one("img")
@@ -235,22 +279,34 @@ class HanimeAPI:
                 cover = "https:" + cover
 
             slug = _prefixed("hcity", raw_slug)
-            if series_name not in series_map:
-                series_map[series_name] = {
-                    "slug": slug,
-                    "title": series_name,
-                    "cover": cover,
-                    "episodes": [],
-                }
-            series_map[series_name]["episodes"].append({
+            ep_entry = {
                 "slug": slug,
                 "name": f"Episode {ep_num}",
                 "ep": ep_num,
                 "url": f"{HENTAICITY_BASE}/video/{raw_slug}.html",
-            })
+            }
+
+            # Find matching series using 3-4 word similarity / prefix matching
+            matched = None
+            for s_item in series_list:
+                if _are_same_series(series_name, s_item["title"]):
+                    matched = s_item
+                    break
+
+            if matched:
+                if not any(e["slug"] == slug or e["ep"] == ep_num for e in matched["episodes"]):
+                    matched["episodes"].append(ep_entry)
+            else:
+                series_list.append({
+                    "slug": slug,
+                    "title": series_name,
+                    "cover": cover,
+                    "episodes": [ep_entry],
+                })
 
         results = []
-        for s_name, data in series_map.items():
+        for data in series_list:
+            data["episodes"].sort(key=lambda x: x["ep"])
             ep_count = len(data["episodes"])
             ep_label = f" ({ep_count} Ep)" if ep_count == 1 else f" ({ep_count} Eps)"
             results.append({
@@ -352,11 +408,13 @@ class HanimeAPI:
                 "referer": f"{HENTAICITY_BASE}/",
             })
 
-        # Sibling episodes lookup
+        # Sibling episodes lookup using 3-4 word similarity
         episodes = []
+        words = _clean_tokens(series_name)
+        search_q = " ".join(words[:2]) if len(words) >= 2 else (words[0] if words else series_name)
         try:
             r_search = self.session.get(
-                f"{HENTAICITY_BASE}/search/videos/{quote_plus(series_name)}",
+                f"{HENTAICITY_BASE}/search/videos/{quote_plus(search_q)}",
                 headers={"Referer": f"{HENTAICITY_BASE}/"},
                 timeout=8,
             )
@@ -372,16 +430,19 @@ class HanimeAPI:
                     continue
                 ep_slug_raw = m_it.group(1)
                 title_it = (img_it.get("alt") if img_it else "") or link.get("title") or link.get_text(" ", strip=True)
-                
-                # Ensure the sibling card actually belongs to the same series
-                if series_name.lower() not in title_it.lower():
+
+                m_ser_it = re.search(r"^(.*?)(?:\s+\d+\s*[-:]|\s+\d+$)", title_it)
+                s_name_it = m_ser_it.group(1).strip() if m_ser_it else title_it
+
+                # Match series with 3-4 same word logic
+                if not _are_same_series(series_name, s_name_it):
                     continue
 
                 m_ep_it = re.search(r"(?:^|\s)(\d+)(?:\s*[-:]|$)", title_it)
                 ep_n = int(m_ep_it.group(1)) if m_ep_it else 1
-                
+
                 ep_s = _prefixed("hcity", ep_slug_raw)
-                if not any(e["slug"] == ep_s for e in episodes):
+                if not any(e["slug"] == ep_s or e["ep"] == ep_n for e in episodes):
                     episodes.append({
                         "id": ep_s,
                         "slug": ep_s,
@@ -449,7 +510,7 @@ class HanimeAPI:
         if not cards:
             return []
 
-        series_map = {}
+        series_list = []
         for card in cards:
             link = card.select_one("a[href*='/watch?e=']")
             if not link:
@@ -475,8 +536,20 @@ class HanimeAPI:
             quality_label = "4K" if is_4k else "1080p"
             slug = _prefixed("oppai", raw_slug)
 
-            if series_title not in series_map:
-                series_map[series_title] = {
+            matched = None
+            for s_item in series_list:
+                if _are_same_series(series_title, s_item["title"]):
+                    matched = s_item
+                    break
+
+            if matched:
+                if raw_slug not in matched["episodes"]:
+                    matched["episodes"].append(raw_slug)
+                if is_4k:
+                    matched["quality"] = "4K"
+                    matched["brand"] = "oppai.stream (4K)"
+            else:
+                series_list.append({
                     "slug": slug,
                     "title": series_title,
                     "quality": quality_label,
@@ -484,15 +557,11 @@ class HanimeAPI:
                     "tags": tags,
                     "brand": "oppai.stream (4K)" if is_4k else "oppai.stream",
                     "description": card.get("desc", ""),
-                    "episodes": [],
-                }
-            if is_4k:
-                series_map[series_title]["quality"] = "4K"
-                series_map[series_title]["brand"] = "oppai.stream (4K)"
-            series_map[series_title]["episodes"].append(raw_slug)
+                    "episodes": [raw_slug],
+                })
 
         results = []
-        for series_title, item in series_map.items():
+        for item in series_list:
             ep_count = len(item["episodes"])
             ep_label = f" ({ep_count} Ep)" if ep_count == 1 else f" ({ep_count} Eps)"
             results.append({
@@ -579,7 +648,7 @@ class HanimeAPI:
 
         streams.sort(key=lambda s: -s["height"])
 
-        # Sibling episodes lookup
+        # Sibling episodes lookup using similarity matching
         episodes = []
         base_name = re.sub(r"[-_]\d+$", "", raw_slug)
         search_q = base_name.replace("-", " ").strip()
