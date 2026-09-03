@@ -38,6 +38,7 @@ N_M3U8DL_TIMEOUT = 60
 PROGRESS_UPDATE_INTERVAL = 3.5
 
 ACTIVE_DOWNLOADS = {}
+CANCELLED_DOWNLOADS = set()
 hanime_api = HanimeAPI()
 
 
@@ -136,6 +137,16 @@ def _format_speed(bytes_per_sec: float) -> str:
         return f"{bytes_per_sec / 1024:.1f} KB/s"
     else:
         return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+
+
+def _is_cancelled(chat_id: int) -> bool:
+    """Central check: is this user's download cancelled?"""
+    if chat_id in CANCELLED_DOWNLOADS:
+        return True
+    dl = ACTIVE_DOWNLOADS.get(chat_id)
+    if dl and dl.get("cancelled"):
+        return True
+    return False
 
 
 class DownloadProgressTracker:
@@ -263,39 +274,49 @@ class UploadProgressTracker:
         )
 
 
-CANCELLED_DOWNLOADS = set()
-
-
 async def cancel_download_callback(client: Client, callback_query: CallbackQuery):
+    """Handle 🛑 Stop Download button press."""
     chat_id = callback_query.from_user.id
     log.info("=== CANCEL CALLBACK RECEIVED for chat_id=%s ===", chat_id)
+
+    # Mark as cancelled in BOTH places immediately
     CANCELLED_DOWNLOADS.add(chat_id)
 
     if chat_id in ACTIVE_DOWNLOADS:
         dl_info = ACTIVE_DOWNLOADS[chat_id]
         dl_info["cancelled"] = True
+
+        # Kill the aiohttp session to abort mid-stream
         session = dl_info.get("session")
         if session and not session.closed:
             try:
                 await session.close()
             except Exception:
                 pass
+
+        # Kill any subprocess (ffmpeg, N_m3u8DL-RE)
         proc = dl_info.get("process")
         if proc:
             try:
                 proc.kill()
             except Exception:
                 pass
+
+        # Cancel the asyncio task
         task = dl_info.get("task")
         if task and not task.done():
             task.cancel()
 
+        # Clean up partial file
         filename = dl_info.get("filename")
         if filename and os.path.exists(filename):
             try:
                 os.unlink(filename)
             except Exception:
                 pass
+
+        # Remove from active downloads immediately
+        ACTIVE_DOWNLOADS.pop(chat_id, None)
 
         try:
             await callback_query.answer("🛑 Download cancelled!", show_alert=True)
@@ -342,6 +363,10 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
             if chat_id and chat_id in ACTIVE_DOWNLOADS:
                 ACTIVE_DOWNLOADS[chat_id]["session"] = session
 
+            # Check cancel BEFORE starting
+            if _is_cancelled(chat_id):
+                return False
+
             async with session.get(url) as resp:
                 if chat_id and chat_id in ACTIVE_DOWNLOADS:
                     ACTIVE_DOWNLOADS[chat_id]["response"] = resp
@@ -362,8 +387,9 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
 
                 with open(filename, "wb") as f:
                     async for chunk in resp.content.iter_chunked(512 * 1024):
-                        if chat_id in CANCELLED_DOWNLOADS or (chat_id and ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled")):
-                            log.info("Download cancelled for chat %s", chat_id)
+                        # Check cancel on EVERY chunk
+                        if _is_cancelled(chat_id):
+                            log.info("Download cancelled mid-chunk for chat %s", chat_id)
                             return False
                         f.write(chunk)
                         downloaded += len(chunk)
@@ -397,7 +423,7 @@ async def _download_direct(url: str, filename: str, progress_cb=None, referer: s
         return False
 
 
-async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
+async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None, referer: str = "", chat_id: int = 0) -> bool:
     if not os.path.isfile(N_M3U8DL_RE) or not os.access(N_M3U8DL_RE, os.X_OK):
         return False
 
@@ -422,13 +448,17 @@ async def _download_n_m3u8dl(url: str, filename: str, progress_cb=None, referer:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        # Store process for cancel
+        if chat_id and chat_id in ACTIVE_DOWNLOADS:
+            ACTIVE_DOWNLOADS[chat_id]["process"] = proc
+
         await asyncio.wait_for(proc.communicate(), timeout=N_M3U8DL_TIMEOUT)
         return os.path.exists(filename) and os.path.getsize(filename) > 50_000
     except Exception:
         return False
 
 
-async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None, referer: str = "") -> bool:
+async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None, referer: str = "", chat_id: int = 0) -> bool:
     cmd = [
         "ffmpeg", "-y",
         "-headers", f"Referer: {referer}\r\nUser-Agent: Mozilla/5.0\r\n" if referer else "User-Agent: Mozilla/5.0\r\n",
@@ -443,6 +473,10 @@ async def _download_hls_ffmpeg(url: str, filename: str, progress_cb=None, refere
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        # Store process for cancel
+        if chat_id and chat_id in ACTIVE_DOWNLOADS:
+            ACTIVE_DOWNLOADS[chat_id]["process"] = proc
+
         await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT)
         return os.path.exists(filename) and os.path.getsize(filename) > 50_000
     except Exception:
@@ -459,7 +493,7 @@ def _extract_series_name(slug: str) -> str:
 @approved_only
 @force_sub
 async def hentaidl(client: Client, callback_query: CallbackQuery):
-    """Download video with quality selection support."""
+    """Download video with STRICT quality enforcement — only download the exact quality user selected."""
     raw_data = callback_query.data.split("_", 1)[1]
     target_quality = None
     if raw_data.endswith("_4k"):
@@ -488,7 +522,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
     # Check cache
     db = get_db()
     cache_key = f"{slug}_{target_quality}" if target_quality else slug
-    cached = await db.Name.find_one({"name": cache_key}) or await db.Name.find_one({"name": slug})
+    cached = await db.Name.find_one({"name": cache_key})
 
     if cached and cached.get("file_size", 0) > 50_000:
         thumb_path = None
@@ -527,7 +561,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
     start_time = time.time()
     await _safe_edit(callback_query, f"🚀 **Preparing Download**\n\n[{'░'*12}] 0.0%\n\n⏳ Resolving video stream...")
 
-    # Fetch streams
+    # Fetch streams with target quality
     try:
         data = await asyncio.to_thread(hanime_api.get_streams, slug, target_quality)
     except Exception:
@@ -535,8 +569,8 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         await _safe_edit(callback_query, "❌ API unavailable. Please try again later.")
         return
 
-    dl_url = data.get("dl_url", "")
     streams = data.get("streams", [])
+    dl_url = data.get("dl_url", "")
 
     if not dl_url and not streams:
         is_oppai = "oppai" in slug
@@ -548,6 +582,26 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         )
         return
 
+    # ── STRICT quality filtering: only use streams matching the user's requested quality ──
+    if target_quality and target_quality != "best":
+        tq = target_quality.lower()
+        if tq in ("4k", "2160"):
+            filtered = [s for s in streams if s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower()]
+        elif tq == "1080":
+            filtered = [s for s in streams if s.get("height", 0) == 1080 or "1080" in s.get("label", "").lower()]
+        elif tq == "720":
+            filtered = [s for s in streams if s.get("height", 0) == 720 or "720" in s.get("label", "").lower()]
+        elif tq == "480":
+            filtered = [s for s in streams if s.get("height", 0) == 480 or "480" in s.get("label", "").lower()]
+        else:
+            filtered = streams
+
+        if filtered:
+            streams = filtered
+            dl_url = streams[0].get("url", "")
+        else:
+            log.warning("No streams matched quality %s for slug %s, using best available", target_quality, slug)
+    
     primary_stream = streams[0] if streams else {}
     ext = primary_stream.get("extension") or ("webm" if dl_url.endswith(".webm") else "mp4")
     referer = primary_stream.get("referer", "https://www.hentaicity.com/")
@@ -558,6 +612,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         [InlineKeyboardButton("🛑 Stop Download", callback_data=f"canceldl_{chat_id}")]
     ])
 
+    # Reset cancel state for this user
     CANCELLED_DOWNLOADS.discard(chat_id)
     ACTIVE_DOWNLOADS[chat_id] = {
         "task": asyncio.current_task(),
@@ -566,6 +621,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         "filename": filename,
         "session": None,
         "response": None,
+        "process": None,
     }
 
     try:
@@ -573,38 +629,27 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         active_stream_label = quality_label
 
         async def on_progress(stats):
-            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+            if _is_cancelled(chat_id):
                 raise asyncio.CancelledError("Cancelled by user")
             msg = tracker.format_message(stats, title=f"Downloading [{active_stream_label}]", slug=slug)
             await _safe_edit(callback_query, msg, reply_markup=cancel_keyboard)
 
-        # Build stream candidate list
-        candidate_urls = []
-        if dl_url:
-            candidate_urls.append({
-                "url": dl_url,
-                "referer": referer,
-                "kind": primary_stream.get("kind", ""),
-                "label": quality_label,
-                "extension": ext,
-            })
-        for s in streams:
-            if s.get("url") and not any(c["url"] == s["url"] for c in candidate_urls):
-                candidate_urls.append(s)
-
-        for candidate in candidate_urls:
-            # STOP immediately if user tapped cancel!
-            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
-                log.info("Download cancelled by user for chat %s, halting candidate loop", chat_id)
+        # ── STRICT: Only try streams that match the user's requested quality ──
+        # Do NOT fall through to other qualities. If the matched stream fails, stop.
+        for stream in streams:
+            # Check cancel BEFORE each attempt
+            if _is_cancelled(chat_id):
+                log.info("Download cancelled by user for chat %s, stopping", chat_id)
                 return
 
-            c_url = candidate.get("url", "")
+            c_url = stream.get("url", "")
             if not c_url:
                 continue
-            c_ref = candidate.get("referer", referer)
-            c_kind = candidate.get("kind", "")
-            c_label = candidate.get("label", quality_label)
-            c_ext = candidate.get("extension", "mp4")
+
+            c_ref = stream.get("referer", referer)
+            c_kind = stream.get("kind", "")
+            c_label = stream.get("label", quality_label)
+            c_ext = stream.get("extension", "mp4")
             active_stream_label = c_label
 
             if c_ext and filename.rsplit(".", 1)[-1] != c_ext:
@@ -612,19 +657,23 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
                 if chat_id in ACTIVE_DOWNLOADS:
                     ACTIVE_DOWNLOADS[chat_id]["filename"] = filename
 
+            tracker = DownloadProgressTracker(0, start_time)
+
             if not c_url.endswith(".m3u8") and c_kind != "hls":
-                log.info("Trying direct download for %s: %s", slug, c_url[:80])
-                tracker = DownloadProgressTracker(0, start_time)
+                log.info("Trying direct download [%s] for %s: %s", c_label, slug, c_url[:80])
                 downloaded = await _download_direct(c_url, filename, on_progress, referer=c_ref, chat_id=chat_id)
             elif ".m3u8" in c_url or c_kind == "hls":
-                log.info("Trying HLS download for %s: %s", slug, c_url[:80])
-                tracker = DownloadProgressTracker(0, start_time)
-                downloaded = await _download_n_m3u8dl(c_url, filename, on_progress, referer=c_ref)
-                if not downloaded and chat_id not in CANCELLED_DOWNLOADS and not ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
-                    downloaded = await _download_hls_ffmpeg(c_url, filename, on_progress, referer=c_ref)
+                log.info("Trying HLS download [%s] for %s: %s", c_label, slug, c_url[:80])
+                downloaded = await _download_n_m3u8dl(c_url, filename, on_progress, referer=c_ref, chat_id=chat_id)
+                if not downloaded and not _is_cancelled(chat_id):
+                    downloaded = await _download_hls_ffmpeg(c_url, filename, on_progress, referer=c_ref, chat_id=chat_id)
 
-            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
-                log.info("Download cancelled during candidate processing for chat %s", chat_id)
+            # Check cancel AFTER each attempt
+            if _is_cancelled(chat_id):
+                log.info("Download cancelled during processing for chat %s", chat_id)
+                if os.path.exists(filename):
+                    try: os.remove(filename)
+                    except OSError: pass
                 return
 
             if downloaded and os.path.exists(filename) and os.path.getsize(filename) > 50_000:
@@ -633,13 +682,11 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             else:
                 downloaded = False
                 if os.path.exists(filename):
-                    try:
-                        os.remove(filename)
-                    except OSError:
-                        pass
+                    try: os.remove(filename)
+                    except OSError: pass
 
         if not downloaded:
-            if chat_id in CANCELLED_DOWNLOADS or ACTIVE_DOWNLOADS.get(chat_id, {}).get("cancelled"):
+            if _is_cancelled(chat_id):
                 return
             elapsed = int(time.time() - start_time)
             is_oppai = "oppai" in slug
@@ -653,18 +700,17 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
             return
     finally:
         ACTIVE_DOWNLOADS.pop(chat_id, None)
-        CANCELLED_DOWNLOADS.discard(chat_id)
+        # Do NOT discard from CANCELLED_DOWNLOADS here — let cancel_download_callback handle cleanup
 
     if not os.path.exists(filename) or os.path.getsize(filename) < 50_000:
         await _safe_edit(callback_query, "❌ Download produced an empty or corrupted file.")
         if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except OSError:
-                pass
+            try: os.remove(filename)
+            except OSError: pass
         return
 
-    # Upload Phase with strict 3.5s rate limiting
+    # Upload Phase
+    thumb_path = None
     try:
         file_size = os.path.getsize(filename)
         upload_tracker = UploadProgressTracker(file_size, time.time())
@@ -685,7 +731,6 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         )
 
         info = None
-        thumb_path = None
         try:
             info = await asyncio.to_thread(hanime_api.details, slug)
             series_name = _extract_series_name(slug)
@@ -728,7 +773,7 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         await track_message(chat_id, sent.id)
         file_id = (sent.video.file_id if sent.video else sent.document.file_id) if sent else ""
 
-        # Cache file in DB
+        # Cache file in DB with quality-specific key
         if file_id:
             await db.Name.update_one(
                 {"name": cache_key},
@@ -766,15 +811,12 @@ async def hentaidl(client: Client, callback_query: CallbackQuery):
         await _safe_edit(callback_query, "❌ Upload to Telegram failed. Please try again.")
     finally:
         if thumb_path and os.path.exists(thumb_path):
-            try:
-                os.unlink(thumb_path)
-            except OSError:
-                pass
+            try: os.unlink(thumb_path)
+            except OSError: pass
         if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except OSError:
-                pass
+            try: os.remove(filename)
+            except OSError: pass
+        CANCELLED_DOWNLOADS.discard(chat_id)
 
 
 @approved_only
@@ -870,10 +912,8 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
 
         if not downloaded or not os.path.exists(filename) or os.path.getsize(filename) < 50_000:
             if os.path.exists(filename):
-                try:
-                    os.remove(filename)
-                except OSError:
-                    pass
+                try: os.remove(filename)
+                except OSError: pass
             failed += 1
             continue
 
@@ -896,10 +936,8 @@ async def batch_download(client: Client, callback_query: CallbackQuery):
             failed += 1
         finally:
             if os.path.exists(filename):
-                try:
-                    os.remove(filename)
-                except OSError:
-                    pass
+                try: os.remove(filename)
+                except OSError: pass
 
     final_bar = _progress_bar_detailed(100.0)
     try:

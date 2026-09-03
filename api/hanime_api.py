@@ -199,6 +199,12 @@ class HanimeAPI:
         return self._oppai_details(raw_slug)
 
     def get_streams(self, slug: str, target_quality: str | None = None) -> dict:
+        """Fetch streams for a slug.
+        
+        When target_quality is set, ONLY return streams matching that exact quality.
+        This prevents the download handler from accidentally falling through to a 
+        different quality (e.g. downloading 4K when user wanted 1080p).
+        """
         info = self.details(slug)
         streams = list(info.get("streams", []))
 
@@ -212,8 +218,8 @@ class HanimeAPI:
             ),
         )
 
-        # If a specific target quality was selected by user, prioritize it
-        if target_quality:
+        # If a specific target quality was selected by user, STRICTLY filter to that quality only
+        if target_quality and target_quality != "best":
             tq = str(target_quality).lower().strip()
             if tq in ("4k", "2160", "2160p"):
                 matched = [s for s in streams if s.get("height", 0) >= 2160 or "4k" in s.get("label", "").lower()]
@@ -225,9 +231,13 @@ class HanimeAPI:
                 matched = [s for s in streams if s.get("height", 0) == 480 or "480" in s.get("label", "").lower()]
             else:
                 matched = []
+
             if matched:
-                rest = [s for s in streams if s not in matched]
-                streams = matched + rest
+                # STRICT: only return the matched quality streams, no fallbacks
+                streams = matched
+                log.info("Quality filter: %s -> %d stream(s) matched for %s", tq, len(matched), slug)
+            else:
+                log.warning("No streams matched quality '%s' for slug '%s', returning all %d streams", tq, slug, len(streams))
 
         dl_url = streams[0].get("url", "") if streams else ""
         return {
@@ -307,11 +317,13 @@ class HanimeAPI:
         results = []
         for data in series_list:
             data["episodes"].sort(key=lambda x: x["ep"])
+            # Use the first (lowest) episode's slug as the series representative
+            first_ep_slug = data["episodes"][0]["slug"]
             ep_count = len(data["episodes"])
             ep_label = f" ({ep_count} Ep)" if ep_count == 1 else f" ({ep_count} Eps)"
             results.append({
-                "id": data["slug"],
-                "slug": data["slug"],
+                "id": first_ep_slug,
+                "slug": first_ep_slug,
                 "name": data["title"],
                 "title": f"{data['title']}{ep_label} [1080p]",
                 "source": "hentaicity.com",
@@ -562,11 +574,20 @@ class HanimeAPI:
 
         results = []
         for item in series_list:
+            # Sort episode slugs by episode number (extract trailing digits)
+            def _ep_sort_key(raw_s):
+                m = re.search(r"[-_](\d+)$", raw_s)
+                return int(m.group(1)) if m else 1
+            item["episodes"].sort(key=_ep_sort_key)
+            
+            # Use the FIRST (lowest) episode's slug as the series representative
+            first_ep_slug = _prefixed("oppai", item["episodes"][0])
+            
             ep_count = len(item["episodes"])
             ep_label = f" ({ep_count} Ep)" if ep_count == 1 else f" ({ep_count} Eps)"
             results.append({
-                "id": item["slug"],
-                "slug": item["slug"],
+                "id": first_ep_slug,
+                "slug": first_ep_slug,
                 "name": item["title"],
                 "title": f"{item['title']}{ep_label} [{item['quality']}]",
                 "source": "oppai.stream",
