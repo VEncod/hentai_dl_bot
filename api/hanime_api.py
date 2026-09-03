@@ -608,13 +608,22 @@ class HanimeAPI:
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
-        if "locked.php" in response.url or soup.select_one(".login-required, .requires-login"):
-            log.info("Oppai episode requires login: %s", raw_slug)
-            return self._empty_details(_prefixed("oppai", raw_slug), "oppai.stream (4K)")
+        needs_login = "locked.php" in response.url or bool(soup.select_one(".login-required, .requires-login"))
+        if needs_login:
+            log.info("Oppai episode requires login: %s (will still search for siblings)", raw_slug)
 
-        title_el = soup.select_one("h1")
-        title_text = title_el.get_text(" ", strip=True) if title_el else raw_slug.replace("-", " ").title()
-        title_text = re.sub(r"\s+Ep\s+\d+$", "", title_text, flags=re.I)
+        # Extract page info (may be limited if login-locked)
+        if needs_login:
+            # Locked pages show "Before you can watch this" — derive title from slug
+            slug_title = re.sub(r"[-_]\d+$", "", raw_slug)  # strip trailing ep number
+            slug_title = slug_title.replace("~", " ").replace("-", " ").strip()
+            title_text = slug_title or raw_slug.replace("-", " ").title()
+        else:
+            title_el = soup.select_one("h1")
+            title_text = title_el.get_text(" ", strip=True) if title_el else raw_slug.replace("-", " ").title()
+            title_text = re.sub(r"\s+Ep\s+\d+$", "", title_text, flags=re.I)
+        # Also strip trailing episode numbers like "Overflow 1" → "Overflow"
+        title_text_clean = re.sub(r"\s+\d+\s*$", "", title_text).strip() or title_text
 
         description_el = soup.select_one(".description")
         description = description_el.get_text(" ", strip=True) if description_el else ""
@@ -624,54 +633,59 @@ class HanimeAPI:
 
         tags = [tag.get_text(" ", strip=True) for tag in soup.select(".tags .tag h5")]
 
-        default_source_el = soup.select_one("video#episode source") or soup.select_one("video source")
-        default_src = default_source_el.get("src") if default_source_el else ""
-
+        # Extract streams (empty if locked)
         streams = []
-        res_buttons = soup.select(".swap-res-ios[resolution]") or soup.select(".swap-resolution[resolution]")
-        for btn in res_buttons:
-            res = btn.get("resolution", "").lower().strip()
-            if not res or res in ("auto",):
-                continue
+        if not needs_login:
+            default_source_el = soup.select_one("video#episode source") or soup.select_one("video source")
+            default_src = default_source_el.get("src") if default_source_el else ""
 
-            ext = "webm" if res == "4k" else "mp4"
-            for cls in btn.get("class", []):
-                if cls.startswith("rtyp-"):
-                    ext = cls.replace("rtyp-", "").lower()
+            res_buttons = soup.select(".swap-res-ios[resolution]") or soup.select(".swap-resolution[resolution]")
+            for btn in res_buttons:
+                res = btn.get("resolution", "").lower().strip()
+                if not res or res in ("auto",):
+                    continue
 
-            if default_src:
-                stream_url = re.sub(r"/(?:720|1080|4k)/", f"/{res}/", default_src, flags=re.I)
-                stream_url = re.sub(r"\.\w+(\?.*)?$", f".{ext}", stream_url)
-            else:
-                stream_url = ""
+                ext = "webm" if res == "4k" else "mp4"
+                for cls in btn.get("class", []):
+                    if cls.startswith("rtyp-"):
+                        ext = cls.replace("rtyp-", "").lower()
 
-            height_val = 2160 if res == "4k" else (_int(res) if res.isdigit() else 1080)
-            streams.append({
-                "url": stream_url,
-                "height": height_val,
-                "kind": ext,
-                "extension": ext,
-                "label": "4K (2160p)" if res == "4k" else f"{res}p",
-                "is_downloadable": True,
-                "referer": f"{OPPAI_BASE}/",
-            })
+                if default_src:
+                    stream_url = re.sub(r"/(?:720|1080|4k)/", f"/{res}/", default_src, flags=re.I)
+                    stream_url = re.sub(r"\.\w+(\?.*)?$", f".{ext}", stream_url)
+                else:
+                    stream_url = ""
 
-        if not streams and default_src:
-            streams.append({
-                "url": default_src,
-                "height": 720,
-                "kind": "mp4",
-                "extension": "mp4",
-                "label": "720p",
-                "is_downloadable": True,
-                "referer": f"{OPPAI_BASE}/",
-            })
+                height_val = 2160 if res == "4k" else (_int(res) if res.isdigit() else 1080)
+                streams.append({
+                    "url": stream_url,
+                    "height": height_val,
+                    "kind": ext,
+                    "extension": ext,
+                    "label": "4K (2160p)" if res == "4k" else f"{res}p",
+                    "is_downloadable": True,
+                    "referer": f"{OPPAI_BASE}/",
+                })
+
+            if not streams and default_src:
+                streams.append({
+                    "url": default_src,
+                    "height": 720,
+                    "kind": "mp4",
+                    "extension": "mp4",
+                    "label": "720p",
+                    "is_downloadable": True,
+                    "referer": f"{OPPAI_BASE}/",
+                })
 
         streams.sort(key=lambda s: -s["height"])
 
-        # Sibling episodes lookup using similarity matching
+        # ── Sibling episodes lookup (ALWAYS runs, even if login-locked) ──
         episodes = []
-        tokens = _clean_tokens(raw_slug)
+        # Use the series name (without episode number) for better search
+        tokens = _clean_tokens(title_text_clean)
+        if not tokens:
+            tokens = _clean_tokens(raw_slug)
         search_q = tokens[0] if tokens else raw_slug.split("-")[0]
         try:
             r_search = self.session.get(
@@ -680,7 +694,7 @@ class HanimeAPI:
                 timeout=8,
             )
             s_soup = BeautifulSoup(r_search.text, "html.parser")
-            clean_raw = raw_slug.replace("~", " ").replace("-", " ")
+            # Compare against the clean series title (without ep numbers)
             for card in s_soup.select(".episode-shown"):
                 link = card.select_one("a[href*='/watch?e=']")
                 if not link:
@@ -692,9 +706,11 @@ class HanimeAPI:
 
                 title_node = card.select_one("font.title")
                 card_title = title_node.get_text(" ", strip=True) if title_node else card.get("name", ep_raw_slug)
+                # Strip episode number from card title for series-level comparison
+                card_series = re.sub(r"\s+Ep\s+\d+$", "", card_title, flags=re.I).strip()
 
                 clean_ep = ep_raw_slug.replace("~", " ").replace("-", " ")
-                if not _are_same_series(card_title, clean_raw) and not _are_same_series(clean_ep, clean_raw):
+                if not _are_same_series(card_series, title_text_clean) and not _are_same_series(clean_ep, title_text_clean):
                     continue
 
                 ep_match = re.search(r"[-_](\d+)$", ep_raw_slug)
